@@ -1,0 +1,9 @@
+# Xcode & SPM
+.DS_Store
+/.build/
+/output/
+/.swiftpm/
+xcuserdata/
+DerivedData/
+*.xcuserstate
+*.xcworkspace

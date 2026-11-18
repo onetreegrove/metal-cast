@@ -1,0 +1,966 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MetalCast - macOS Native UI & Interaction Prototype</title>
+<style>
+  :root {
+    --bg-system: #1e1e24;
+    --window-bg: rgba(30, 30, 36, 0.82);
+    --window-border: rgba(255, 255, 255, 0.12);
+    --window-shadow: 0 24px 60px rgba(0, 0, 0, 0.55), 0 4px 16px rgba(0, 0, 0, 0.35);
+    --sidebar-bg: rgba(25, 25, 30, 0.75);
+    --card-bg: rgba(255, 255, 255, 0.05);
+    --card-border: rgba(255, 255, 255, 0.08);
+    --accent: #0A84FF;
+    --accent-hover: #409CFF;
+    --accent-glow: rgba(10, 132, 255, 0.35);
+    --success: #30D158;
+    --warning: #FF9F0A;
+    --danger: #FF453A;
+    --text-primary: #FFFFFF;
+    --text-secondary: rgba(255, 255, 255, 0.65);
+    --text-tertiary: rgba(255, 255, 255, 0.4);
+    --font-stack: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+
+  body {
+    background: radial-gradient(circle at 20% 20%, #202638 0%, #111319 100%);
+    font-family: var(--font-stack);
+    color: var(--text-primary);
+    min-height: 100vh;
+    overflow-x: hidden;
+    position: relative;
+    padding-bottom: 40px;
+  }
+
+  /* macOS Top Menu Bar */
+  .macos-menubar {
+    height: 30px;
+    background: rgba(20, 20, 25, 0.7);
+    backdrop-filter: blur(25px) saturate(180%);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    font-size: 13px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+  }
+  .menubar-left, .menubar-right { display: flex; align-items: center; gap: 18px; }
+  .apple-icon { font-size: 14px; font-weight: bold; }
+  .app-name { font-weight: 600; color: #fff; }
+  .menu-item { color: var(--text-secondary); cursor: pointer; transition: color 0.15s; }
+  .menu-item:hover { color: #fff; }
+  .status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    background: rgba(48, 209, 88, 0.15);
+    border-radius: 12px;
+    color: var(--success);
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .status-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  /* Workspace Layout */
+  .workspace {
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 32px;
+    padding: 36px 24px;
+    max-width: 1540px;
+    margin: 0 auto;
+    flex-wrap: wrap;
+  }
+
+  /* macOS Window Frame Generic */
+  .mac-window {
+    background: var(--window-bg);
+    backdrop-filter: blur(40px) saturate(190%);
+    border: 1px solid var(--window-border);
+    border-radius: 14px;
+    box-shadow: var(--window-shadow);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+    transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.25s;
+  }
+
+  .window-header {
+    height: 48px;
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    background: rgba(255, 255, 255, 0.02);
+    position: relative;
+  }
+  .traffic-lights {
+    display: flex;
+    gap: 8px;
+    margin-right: 14px;
+  }
+  .traffic-btn {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: none;
+    cursor: pointer;
+  }
+  .btn-close { background: #FF5F56; }
+  .btn-min { background: #FFBD2E; }
+  .btn-max { background: #27C93F; }
+  .window-title {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    letter-spacing: -0.2px;
+  }
+
+  /* ================================================= */
+  /* Window 1: Main Control Center (控制中心)          */
+  /* ================================================= */
+  .control-window {
+    width: 660px;
+    height: 720px;
+  }
+  .control-body {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+  .sidebar {
+    width: 220px;
+    background: var(--sidebar-bg);
+    border-right: 1px solid rgba(255, 255, 255, 0.06);
+    padding: 14px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .sidebar-section-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    padding: 4px 10px;
+    letter-spacing: 0.5px;
+  }
+  .device-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .device-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.1s;
+  }
+  .device-item:hover { background: rgba(255, 255, 255, 0.06); }
+  .device-item.active {
+    background: var(--accent);
+    box-shadow: 0 4px 12px var(--accent-glow);
+  }
+  .device-item.active .device-name, .device-item.active .device-sub {
+    color: #fff !important;
+  }
+  .device-icon { font-size: 18px; }
+  .device-info { display: flex; flex-direction: column; line-height: 1.25; }
+  .device-name { font-size: 13px; font-weight: 500; color: var(--text-primary); }
+  .device-sub { font-size: 11px; color: var(--text-tertiary); }
+  .badge-tag {
+    margin-left: auto;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.12);
+  }
+
+  /* Main Content Area */
+  .main-pane {
+    flex: 1;
+    padding: 22px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    overflow-y: auto;
+  }
+  .device-hero-card {
+    background: linear-gradient(135deg, rgba(10, 132, 255, 0.12) 0%, rgba(255, 255, 255, 0.03) 100%);
+    border: 1px solid rgba(10, 132, 255, 0.25);
+    border-radius: 12px;
+    padding: 16px 18px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .hero-left h3 { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+  .hero-meta { display: flex; gap: 12px; font-size: 12px; color: var(--text-secondary); }
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    padding: 10px 20px;
+    font-size: 13.5px;
+    font-weight: 600;
+    border-radius: 8px;
+    cursor: pointer;
+    box-shadow: 0 4px 14px var(--accent-glow);
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .btn-primary:hover { background: var(--accent-hover); transform: translateY(-1px); }
+  .btn-primary:active { transform: translateY(0); }
+
+  /* Setting Sections */
+  .section-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .card-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 13px;
+  }
+  .setting-label-box { display: flex; flex-direction: column; }
+  .setting-desc { font-size: 11px; color: var(--text-tertiary); margin-top: 2px; }
+
+  /* Segmented Control (Mac Style) */
+  .segmented-control {
+    display: flex;
+    background: rgba(0, 0, 0, 0.3);
+    padding: 2px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .segment-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    padding: 4px 12px;
+    font-size: 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .segment-btn.active {
+    background: rgba(255, 255, 255, 0.16);
+    color: #fff;
+    font-weight: 500;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  }
+
+  /* Mac Toggle Switch */
+  .switch {
+    position: relative;
+    display: inline-block;
+    width: 38px;
+    height: 22px;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-color: rgba(255, 255, 255, 0.18);
+    transition: .25s;
+    border-radius: 22px;
+  }
+  .slider:before {
+    position: absolute;
+    content: "";
+    height: 18px;
+    width: 18px;
+    left: 2px;
+    bottom: 2px;
+    background-color: white;
+    transition: .25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    border-radius: 50%;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+  }
+  input:checked + .slider { background-color: var(--success); }
+  input:checked + .slider:before { transform: translateX(16px); }
+
+  /* ================================================= */
+  /* Window 2: Phone Mirroring Window (投屏视窗)       */
+  /* ================================================= */
+  .mirror-window {
+    width: 360px;
+    height: 760px;
+    border-radius: 36px;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.14);
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    background: #000;
+    transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .mirror-window.screen-off-active .phone-display {
+    filter: brightness(0.08);
+  }
+
+  /* Phone Island / Bezel */
+  .phone-screen-top {
+    height: 36px;
+    background: transparent;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 24px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #fff;
+    z-index: 20;
+    position: absolute;
+    top: 0; left: 0; right: 0;
+  }
+  .camera-punchhole {
+    width: 12px;
+    height: 12px;
+    background: #090909;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+
+  .phone-display {
+    flex: 1;
+    background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="360" height="760" viewBox="0 0 360 760"><defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="%231a2a6c"/><stop offset="50%" stop-color="%23b21f1f"/><stop offset="100%" stop-color="%23fdbb2d"/></linearGradient></defs><rect width="360" height="760" fill="url(%23g)"/></svg>') center/cover;
+    position: relative;
+    border-radius: 36px;
+    overflow: hidden;
+    cursor: default;
+    transition: filter 0.3s ease;
+  }
+
+  /* Simulated Android App/Home UI */
+  .android-home-content {
+    padding-top: 90px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    color: #fff;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  }
+  .clock-widget { font-size: 58px; font-weight: 300; letter-spacing: -2px; }
+  .date-widget { font-size: 14px; opacity: 0.85; margin-top: -6px; }
+
+  .app-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 18px;
+    width: 100%;
+    padding: 100px 22px 0 22px;
+  }
+  .app-icon {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .icon-box {
+    width: 50px;
+    height: 50px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.22);
+    backdrop-filter: blur(10px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+    transition: transform 0.15s;
+  }
+  .icon-box:hover { transform: scale(1.08); }
+
+  /* HUD Overlay for Keymapping */
+  .keymap-hud-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.25);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    z-index: 50;
+  }
+  .keymap-hud-overlay.visible { opacity: 1; }
+  .hud-key {
+    position: absolute;
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    background: rgba(10, 132, 255, 0.85);
+    border: 2px solid #fff;
+    color: #fff;
+    font-weight: 700;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }
+
+  /* Floating Translucent Capsule Toolbar (macOS Style) */
+  .capsule-toolbar {
+    position: absolute;
+    bottom: 22px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(20, 20, 25, 0.78);
+    backdrop-filter: blur(28px) saturate(200%);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 24px;
+    padding: 6px 10px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+    z-index: 100;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .capsule-toolbar:hover {
+    background: rgba(25, 25, 32, 0.92);
+    border-color: rgba(255, 255, 255, 0.25);
+  }
+  .tool-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 14px;
+    position: relative;
+    transition: all 0.15s;
+  }
+  .tool-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: #fff;
+    transform: scale(1.08);
+  }
+  .tool-btn.active {
+    background: var(--accent);
+    color: #fff;
+  }
+  .tool-btn.danger.active {
+    background: var(--danger);
+    color: #fff;
+  }
+  .tool-divider {
+    width: 1px;
+    height: 16px;
+    background: rgba(255, 255, 255, 0.15);
+    margin: 0 4px;
+  }
+
+  /* Recording Live Badge */
+  .recording-indicator {
+    position: absolute;
+    top: 42px;
+    right: 18px;
+    background: rgba(255, 69, 58, 0.88);
+    backdrop-filter: blur(10px);
+    color: #fff;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    display: none;
+    align-items: center;
+    gap: 6px;
+    box-shadow: 0 4px 12px rgba(255, 69, 58, 0.4);
+    z-index: 60;
+  }
+  .recording-indicator.active { display: inline-flex; }
+  .rec-blink {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #fff;
+    animation: blink 1s infinite alternate;
+  }
+  @keyframes blink { 0% { opacity: 0.2; } 100% { opacity: 1; } }
+
+  /* Screenshot Flash Effect */
+  .flash-overlay {
+    position: absolute;
+    inset: 0;
+    background: white;
+    opacity: 0;
+    pointer-events: none;
+    z-index: 200;
+    border-radius: 36px;
+    transition: opacity 0.35s ease-out;
+  }
+  .flash-overlay.flashing { opacity: 0.85; transition: opacity 0.05s ease-in; }
+
+  /* Toast Notification */
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: rgba(30, 30, 35, 0.92);
+    backdrop-filter: blur(25px);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 12px;
+    padding: 12px 18px;
+    color: #fff;
+    font-size: 13px;
+    box-shadow: 0 16px 40px rgba(0,0,0,0.5);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    transform: translateY(100px);
+    opacity: 0;
+    transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    z-index: 9999;
+  }
+  .toast.show { transform: translateY(0); opacity: 1; }
+
+  /* Explanatory Banner */
+  .design-notes {
+    max-width: 1080px;
+    margin: 20px auto 0 auto;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    padding: 20px 24px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+  }
+  .design-notes h4 { color: #fff; margin-bottom: 8px; font-size: 15px; }
+  .design-notes ul { padding-left: 20px; }
+  .design-notes li { margin-bottom: 6px; }
+  .code-tag {
+    background: rgba(255, 255, 255, 0.1);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: ui-monospace, Menlo, Monaco, monospace;
+    color: #409CFF;
+  }
+</style>
+</head>
+<body>
+
+<!-- macOS Top Menu Bar Simulation -->
+<header class="macos-menubar">
+  <div class="menubar-left">
+    <span class="apple-icon"></span>
+    <span class="app-name">MetalCast</span>
+    <span class="menu-item">设备</span>
+    <span class="menu-item">投屏视窗</span>
+    <span class="menu-item">快捷键映射</span>
+    <span class="menu-item">窗口</span>
+    <span class="menu-item">帮助</span>
+  </div>
+  <div class="menubar-right">
+    <div class="status-badge">
+      <span class="status-dot"></span>
+      <span id="top-status">M1/M2/M3 Metal 硬解已就绪 (~3% CPU)</span>
+    </div>
+    <span class="menu-item">⚡︎ 87%</span>
+    <span class="menu-item">2026/11/17 18:00</span>
+  </div>
+</header>
+
+<!-- Workspace Container -->
+<main class="workspace">
+
+  <!-- ============================================== -->
+  <!-- Window 1: Main Control Dashboard (控制中心)    -->
+  <!-- ============================================== -->
+  <section class="mac-window control-window" id="controlWindow">
+    <div class="window-header">
+      <div class="traffic-lights">
+        <button class="traffic-btn btn-close"></button>
+        <button class="traffic-btn btn-min"></button>
+        <button class="traffic-btn btn-max"></button>
+      </div>
+      <div class="window-title">MetalCast 控制中心</div>
+    </div>
+
+    <div class="control-body">
+      <!-- Left Sidebar: Device Navigator -->
+      <aside class="sidebar">
+        <div class="sidebar-section-title">已连接设备 (2)</div>
+        <div class="device-list">
+          <div class="device-item active" onclick="selectDevice(this, 'Xiaomi 14 Pro', 'USB 3.2 模式 · 120Hz', '27183')">
+            <span class="device-icon">📱</span>
+            <div class="device-info">
+              <span class="device-name">Xiaomi 14 Pro</span>
+              <span class="device-sub">USB 3.2 · 120Hz</span>
+            </div>
+            <span class="badge-tag">主设备</span>
+          </div>
+          <div class="device-item" onclick="selectDevice(this, 'Samsung S24 Ultra', 'Wi-Fi 5GHz · 192.168.1.108', '27184')">
+            <span class="device-icon">📶</span>
+            <div class="device-info">
+              <span class="device-name">Galaxy S24 Ultra</span>
+              <span class="device-sub">Wi-Fi · 1080p</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="sidebar-section-title" style="margin-top: 14px;">快速连接</div>
+        <button class="btn-primary" style="padding: 6px 12px; font-size: 12px; justify-content: center;" onclick="quickConnectWifi()">
+          + 添加无线 IP 设备
+        </button>
+
+        <div style="margin-top: auto; padding: 10px; background: rgba(255,255,255,0.03); border-radius: 8px; font-size: 11px; color: var(--text-tertiary);">
+          ADB 状态：正常守护中<br>
+          推流引擎：VideoToolbox<br>
+          渲染通道：Metal NV12
+        </div>
+      </aside>
+
+      <!-- Right Main Setting Pane -->
+      <section class="main-pane">
+        <!-- Device Summary Hero Card -->
+        <div class="device-hero-card">
+          <div class="hero-left">
+            <h3 id="currentDeviceTitle">Xiaomi 14 Pro (Android 14)</h3>
+            <div class="hero-meta">
+              <span id="currentDeviceSub">序列号: 8e45f92a · 分辨率: 3200×1440</span>
+            </div>
+          </div>
+          <button class="btn-primary" onclick="launchMirror()">
+            ▶ 开启原生投屏
+          </button>
+        </div>
+
+        <!-- Presets Configuration Card -->
+        <div class="section-card">
+          <div class="card-title">🎥 视频画质与推流参数</div>
+          <div class="setting-row">
+            <div class="setting-label-box">
+              <span>画面分辨率限制</span>
+              <span class="setting-desc">超高分辨率需要 USB 3.0 或 Wi-Fi 6 链路保障</span>
+            </div>
+            <div class="segmented-control">
+              <button class="segment-btn active" onclick="setSegment(this)">原生</button>
+              <button class="segment-btn" onclick="setSegment(this)">1080P</button>
+              <button class="segment-btn" onclick="setSegment(this)">720P</button>
+            </div>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label-box">
+              <span>最大传输帧率 (Max FPS)</span>
+              <span class="setting-desc">依赖目标设备屏幕刷新率与 Android 10+</span>
+            </div>
+            <div class="segmented-control">
+              <button class="segment-btn" onclick="setSegment(this)">60 fps</button>
+              <button class="segment-btn active" onclick="setSegment(this)">120 fps</button>
+            </div>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label-box">
+              <span>动态码率 (Bitrate)</span>
+              <span class="setting-desc">推荐值：8Mbps ~ 24Mbps</span>
+            </div>
+            <div class="segmented-control">
+              <button class="segment-btn" onclick="setSegment(this)">8 Mbps</button>
+              <button class="segment-btn active" onclick="setSegment(this)">16 Mbps</button>
+              <button class="segment-btn" onclick="setSegment(this)">32 Mbps</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Advanced Native Controls -->
+        <div class="section-card">
+          <div class="card-title">⚙️ 控制与原生特性</div>
+
+          <div class="setting-row">
+            <div class="setting-label-box">
+              <span>投屏时熄灭手机物理屏幕</span>
+              <span class="setting-desc">大幅减少安卓设备发热与耗电（后台持续控制）</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggleScreenOff" onchange="togglePhoneScreenState(this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label-box">
+              <span>双向无缝剪贴板同步</span>
+              <span class="setting-desc">Mac 复制即可在手机随时粘贴 (NSPasteboard)</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label-box">
+              <span>音频实时穿透 (AVAudioEngine)</span>
+              <span class="setting-desc">手机声音无延迟流转到 Mac 扬声器</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+      </section>
+    </div>
+  </section>
+
+  <!-- ============================================== -->
+  <!-- Window 2: Phone Mirroring Window (投屏视窗)    -->
+  <!-- ============================================== -->
+  <section class="mirror-window" id="mirrorWindow">
+    <div class="flash-overlay" id="flashOverlay"></div>
+
+    <!-- Phone Punch-Hole Bezel -->
+    <div class="phone-screen-top">
+      <span>18:00</span>
+      <div class="camera-punchhole"></div>
+      <span>5G · 100%</span>
+    </div>
+
+    <!-- Recording Indicator -->
+    <div class="recording-indicator" id="recBadge">
+      <span class="rec-blink"></span>
+      <span id="recTimer">REC 00:05</span>
+    </div>
+
+    <!-- Phone Simulated Screen Content -->
+    <div class="phone-display" id="phoneDisplay">
+      <div class="android-home-content">
+        <div class="clock-widget">18:00</div>
+        <div class="date-widget">11月17日 星期二 · 晴 22°C</div>
+
+        <div class="app-grid">
+          <div class="app-icon" onclick="showToast('正在启动和平精英 (FPS 模式已预备)...')">
+            <div class="icon-box">🎮</div>
+            <span>和平精英</span>
+          </div>
+          <div class="app-icon" onclick="showToast('正在打开抖音...')">
+            <div class="icon-box">🎵</div>
+            <span>抖音</span>
+          </div>
+          <div class="app-icon" onclick="showToast('打开相册')">
+            <div class="icon-box">🖼️</div>
+            <span>相册</span>
+          </div>
+          <div class="app-icon" onclick="showToast('打开设置')">
+            <div class="icon-box">⚙️</div>
+            <span>设置</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Keymapping HUD Overlay (Visual Mode) -->
+      <div class="keymap-hud-overlay" id="keymapHud">
+        <div class="hud-key" style="top: 320px; left: 60px;">W</div>
+        <div class="hud-key" style="top: 365px; left: 20px;">A</div>
+        <div class="hud-key" style="top: 365px; left: 60px;">S</div>
+        <div class="hud-key" style="top: 365px; left: 100px;">D</div>
+        <div class="hud-key" style="top: 480px; right: 40px; background: rgba(255, 69, 58, 0.85);">射击</div>
+        <div class="hud-key" style="bottom: 120px; right: 50px;">跳跃</div>
+      </div>
+    </div>
+
+    <!-- Floating Capsule Toolbar (macOS Style) -->
+    <nav class="capsule-toolbar">
+      <button class="tool-btn" title="返回 (Cmd + B)" onclick="simulateAndroidNav('BACK')">◀</button>
+      <button class="tool-btn" title="桌面 (Cmd + H)" onclick="simulateAndroidNav('HOME')">●</button>
+      <button class="tool-btn" title="多任务 (Cmd + S)" onclick="simulateAndroidNav('RECENTS')">■</button>
+      <div class="tool-divider"></div>
+      <button class="tool-btn" id="btnScreenOff" title="熄灭物理屏幕 (省电降温)" onclick="togglePhysicalScreen()">🌙</button>
+      <button class="tool-btn" title="快速截屏 (Cmd + Shift + 4)" onclick="triggerScreenshot()">📸</button>
+      <button class="tool-btn danger" id="btnRecord" title="高清录屏 (Cmd + Shift + R)" onclick="toggleRecording()">⏺</button>
+      <div class="tool-divider"></div>
+      <button class="tool-btn" id="btnKeymap" title="切换键鼠游戏映射 HUD (~ 键)" onclick="toggleKeymapOverlay()">🎯</button>
+      <button class="tool-btn" title="全屏视窗 (Cmd + F)" onclick="toggleWindowMax()">⛶</button>
+    </nav>
+  </section>
+
+</main>
+
+<!-- Interactive Toast Container -->
+<div class="toast" id="toastBox">
+  <span id="toastIcon">💡</span>
+  <span id="toastMsg">提示信息</span>
+</div>
+
+<!-- Explanatory Architecture & UX Notes -->
+<div class="design-notes">
+  <h4>💡 MetalCast 交互与工程重构说明</h4>
+  <ul>
+    <li><strong>双窗自由分离</strong>：控制中心可最小化至 macOS Menu Bar（状态栏小图标），投屏视窗拥有独立的 Aspect Ratio 比例锁定机制，支持无边框拉伸与多显示器“幽灵窗口”主动回收。</li>
+    <li><strong>零多余点击</strong>：拖入 APK 自动静默调用 <span class="code-tag">adb install</span>；拖入媒体文件触发 <span class="code-tag">adb push</span> 到下载目录；剪贴板无需在界面按“获取/发送”，自动双向同步。</li>
+    <li><strong>极简悬浮胶囊工具栏</strong>：取代原版笨重的顶部/侧边 ToolForm，鼠标移入手机视窗底部自动呼出，移出变淡隐藏，保持画面纯粹。</li>
+    <li><strong>Metal 零拷贝解码流水线</strong>：底层通过 <span class="code-tag">VideoToolbox</span> 解码出 NV12 格式直接交由 <span class="code-tag">MTKView</span> 呈现，彻底消灭 CPU 软件解码负担。</li>
+  </ul>
+</div>
+
+<script>
+  // Toast Utility
+  let toastTimer = null;
+  function showToast(msg, icon = '💡') {
+    const toast = document.getElementById('toastBox');
+    document.getElementById('toastMsg').innerText = msg;
+    document.getElementById('toastIcon').innerText = icon;
+    toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toast.classList.remove('show'); }, 2600);
+  }
+
+  // Device Selection
+  function selectDevice(el, name, sub, port) {
+    document.querySelectorAll('.device-item').forEach(item => item.classList.remove('active'));
+    el.classList.add('active');
+    document.getElementById('currentDeviceTitle').innerText = name + ' (已连接)';
+    document.getElementById('currentDeviceSub').innerText = '连接模式: ' + sub + ' · 通信端口: ' + port;
+    showToast('已切换至设备: ' + name, '📱');
+  }
+
+  // Segmented Control Switcher
+  function setSegment(btn) {
+    const parent = btn.parentElement;
+    parent.querySelectorAll('.segment-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    showToast('参数已更新: ' + btn.innerText, '⚡️');
+  }
+
+  // Launch Mirror Action
+  function launchMirror() {
+    const mirror = document.getElementById('mirrorWindow');
+    mirror.style.transform = 'scale(1.03)';
+    setTimeout(() => { mirror.style.transform = 'scale(1)'; }, 200);
+    showToast('原生 Metal 视窗推流已连接！', '🚀');
+  }
+
+  // Quick connect Wifi prompt
+  function quickConnectWifi() {
+    const ip = prompt('请输入目标手机的局域网 IP 地址:', '192.168.1.');
+    if (ip) {
+      showToast('正在执行 adb connect ' + ip + ':5555 ...', '📶');
+    }
+  }
+
+  // Nav actions
+  function simulateAndroidNav(type) {
+    const actionNames = {
+      'BACK': '返回 (Back)',
+      'HOME': '回到桌面 (Home)',
+      'RECENTS': '多任务列表 (App Switcher)'
+    };
+    showToast('注入控制事件: ' + actionNames[type], '🎮');
+  }
+
+  // Screenshot flash effect
+  function triggerScreenshot() {
+    const flash = document.getElementById('flashOverlay');
+    flash.classList.add('flashing');
+    setTimeout(() => { flash.classList.remove('flashing'); }, 150);
+    showToast('已保存高清无损截图至剪贴板与访达 (~/Desktop)', '📸');
+  }
+
+  // Recording toggle
+  let isRecording = false;
+  let recSec = 0;
+  let recInterval = null;
+  function toggleRecording() {
+    isRecording = !isRecording;
+    const badge = document.getElementById('recBadge');
+    const btn = document.getElementById('btnRecord');
+
+    if (isRecording) {
+      badge.classList.add('active');
+      btn.classList.add('active');
+      recSec = 0;
+      recInterval = setInterval(() => {
+        recSec++;
+        const m = String(Math.floor(recSec / 60)).padStart(2, '0');
+        const s = String(recSec % 60).padStart(2, '0');
+        document.getElementById('recTimer').innerText = `REC ${m}:${s}`;
+      }, 1000);
+      showToast('开始屏幕硬件实时录制 (AVAssetWriter)...', '⏺');
+    } else {
+      badge.classList.remove('active');
+      btn.classList.remove('active');
+      clearInterval(recInterval);
+      showToast('录像已保存为 .mp4 格式！', '✅');
+    }
+  }
+
+  // Keymapping HUD overlay
+  function toggleKeymapOverlay() {
+    const hud = document.getElementById('keymapHud');
+    const btn = document.getElementById('btnKeymap');
+    hud.classList.toggle('visible');
+    btn.classList.toggle('active');
+    const enabled = hud.classList.contains('visible');
+    showToast(enabled ? '已激活《和平精英》按键映射并锁定鼠标指针' : '已退出游戏按键模式', '🎯');
+  }
+
+  // Toggle physical phone screen power
+  function togglePhysicalScreen() {
+    const mirror = document.getElementById('mirrorWindow');
+    const btn = document.getElementById('btnScreenOff');
+    mirror.classList.toggle('screen-off-active');
+    btn.classList.toggle('active');
+    const isOff = mirror.classList.contains('screen-off-active');
+    showToast(isOff ? '手机物理屏幕已关闭 (投屏仍在持续)' : '手机屏幕已唤醒点亮', '🌙');
+  }
+
+  function togglePhoneScreenState(checked) {
+    const mirror = document.getElementById('mirrorWindow');
+    const btn = document.getElementById('btnScreenOff');
+    if (checked) {
+      mirror.classList.add('screen-off-active');
+      btn.classList.add('active');
+    } else {
+      mirror.classList.remove('screen-off-active');
+      btn.classList.remove('active');
+    }
+  }
+
+  // Toggle window scale
+  function toggleWindowMax() {
+    showToast('切换全屏 / 窗口置顶模式', '⛶');
+  }
+</script>
+</body>
+</html>
