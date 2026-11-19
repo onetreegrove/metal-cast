@@ -27,7 +27,7 @@ permissions:
 jobs:
   build-and-release:
     name: Build Universal Release & Publish
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 30
 
     steps:
