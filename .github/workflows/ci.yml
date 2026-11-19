@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'Sources/**'
+      - 'Resources/**'
+      - 'Package.swift'
+      - 'build_app.sh'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-check:
+    name: Build & Smoke Test
+    runs-on: macos-14
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Verify Build Script & Universal Compilation
+        run: |
+          chmod +x build_app.sh
+          chmod +x Resources/adb
+          ./build_app.sh --universal
+          ls -lh output/

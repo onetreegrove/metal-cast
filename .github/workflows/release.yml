@@ -1,0 +1,85 @@
+name: Release Build & Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '发布版本号 (例如 1.0.0 或 v1.0.0，留空则自动从 tag 读取)'
+        required: false
+        default: ''
+      draft:
+        description: '是否发布为草稿 (Draft)'
+        required: false
+        type: boolean
+        default: false
+      prerelease:
+        description: '是否标记为预发布版 (Pre-release)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build Universal Release & Publish
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: |
+          echo "Xcode Current Path:"
+          xcode-select -p
+          swift --version
+
+      - name: Determine Version
+        id: get_version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            RAW_VER="${{ github.event.inputs.version }}"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            RAW_VER="${GITHUB_REF_NAME}"
+          else
+            RAW_VER="1.0.0"
+          fi
+          # Strip leading v
+          CLEAN_VER="${RAW_VER#v}"
+          echo "version=${CLEAN_VER}" >> $GITHUB_OUTPUT
+          echo "tag=v${CLEAN_VER}" >> $GITHUB_OUTPUT
+          echo "Tag: v${CLEAN_VER}, Version: ${CLEAN_VER}"
+
+      - name: Build Universal App & Generate Packages
+        run: |
+          chmod +x build_app.sh
+          chmod +x Resources/adb
+          ./build_app.sh --universal --package --version "${{ steps.get_version.outputs.version }}"
+
+      - name: Verify Generated Artifacts
+        run: |
+          ls -lh output/
+          cat output/SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_version.outputs.tag }}
+          name: MetalCast ${{ steps.get_version.outputs.tag }}
+          files: |
+            output/MetalCast-*.dmg
+            output/MetalCast-*.zip
+            output/SHA256SUMS.txt
+          generate_release_notes: true
+          draft: ${{ github.event.inputs.draft || false }}
+          prerelease: ${{ github.event.inputs.prerelease || false }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
