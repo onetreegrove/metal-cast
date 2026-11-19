@@ -81,6 +81,102 @@ public actor ADBManager {
         _ = try await runner.run(args: ["disconnect", target])
     }
 
+    /// Discovers nearby wireless ADB devices via mDNS services
+    public func getMdnsServices() async throws -> [DiscoveredWirelessDevice] {
+        let result = try await runner.run(args: ["mdns", "services"])
+        guard result.exitCode == 0 else { return [] }
+
+        var list: [DiscoveredWirelessDevice] = []
+        let lines = result.stdout.components(separatedBy: .newlines)
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty || trimmed.hasPrefix("List of discovered") {
+                continue
+            }
+            let parts = trimmed.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+            guard parts.count >= 3 else { continue }
+            let name = parts[0]
+            let type = parts[1]
+            let addr = parts[2]
+            let device = DiscoveredWirelessDevice(
+                id: "\(name)_\(addr)",
+                name: name,
+                serviceType: type,
+                address: addr
+            )
+            list.append(device)
+        }
+        return list
+    }
+
+    /// Pairs with an Android 11+ wireless debugging device using a 6-digit code
+    public func pairDevice(address: String, code: String) async throws -> (success: Bool, message: String) {
+        let result = try await runner.run(args: ["pair", address, code])
+        let output = result.stdout.isEmpty ? result.stderr : result.stdout
+        let isSuccess = result.exitCode == 0 && output.contains("Successfully paired")
+        return (isSuccess, output.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// Enables TCP/IP debugging on a currently connected USB device
+    public func enableTcpip(serial: String, port: Int = 5555) async throws -> Bool {
+        let result = try await runner.run(args: ["-s", serial, "tcpip", "\(port)"])
+        return result.exitCode == 0
+    }
+
+    /// Retrieves the device's local Wi-Fi IPv4 address
+    public func getDeviceWifiIP(serial: String) async throws -> String? {
+        // Try method 1: ip -f inet addr show wlan0
+        let res1 = try await runner.run(args: ["-s", serial, "shell", "ip -f inet addr show wlan0"])
+        if res1.exitCode == 0 {
+            let pattern = #"inet\s+(\d+\.\d+\.\d+\.\d+)"#
+            if let regex = try? NSRegularExpression(pattern: pattern),
+               let match = regex.firstMatch(in: res1.stdout, range: NSRange(res1.stdout.startIndex..., in: res1.stdout)),
+               let range = Range(match.range(at: 1), in: res1.stdout) {
+                return String(res1.stdout[range])
+            }
+        }
+
+        // Try method 2: getprop dhcp.wlan0.ipaddress
+        let res2 = try await runner.run(args: ["-s", serial, "shell", "getprop dhcp.wlan0.ipaddress"])
+        let ip2 = res2.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !ip2.isEmpty && ip2.contains(".") {
+            return ip2
+        }
+
+        // Try method 3: ip route
+        let res3 = try await runner.run(args: ["-s", serial, "shell", "ip route"])
+        let pattern3 = #"src\s+(\d+\.\d+\.\d+\.\d+)"#
+        if let regex = try? NSRegularExpression(pattern: pattern3),
+           let match = regex.firstMatch(in: res3.stdout, range: NSRange(res3.stdout.startIndex..., in: res3.stdout)),
+           let range = Range(match.range(at: 1), in: res3.stdout) {
+            return String(res3.stdout[range])
+        }
+
+        return nil
+    }
+
+    /// One-click helper: switches a USB device to Wi-Fi connection seamlessly
+    public func switchToWireless(serial: String, port: Int = 5555) async throws -> String {
+        guard let ip = try await getDeviceWifiIP(serial: serial) else {
+            throw NSError(domain: "MetalCast", code: -1, userInfo: [NSLocalizedDescriptionKey: "未能获取手机当前 Wi-Fi IP 地址，请确认手机已连入与 Mac 相同的 Wi-Fi 局域网"])
+        }
+
+        let tcpipSuccess = try await enableTcpip(serial: serial, port: port)
+        guard tcpipSuccess else {
+            throw NSError(domain: "MetalCast", code: -2, userInfo: [NSLocalizedDescriptionKey: "执行 adb tcpip \(port) 失败，请确保 USB 调试已授权"])
+        }
+
+        // Wait brief moment for ADB daemon on device to restart in TCP mode
+        try await Task.sleep(nanoseconds: 1_200_000_000)
+
+        let connectSuccess = try await connectWifi(ip: ip, port: port)
+        guard connectSuccess else {
+            throw NSError(domain: "MetalCast", code: -3, userInfo: [NSLocalizedDescriptionKey: "无法连接无线设备 \(ip):\(port)"])
+        }
+
+        return ip
+    }
+
     /// Installs an APK silently
     public func installApk(serial: String, apkPath: String) async throws {
         let result = try await runner.run(args: ["-s", serial, "install", "-r", apkPath])

@@ -9,6 +9,8 @@ public final class SessionManager: ObservableObject {
 
     @Published public var devices: [ADBDevice] = []
     @Published public var selectedDevice: ADBDevice?
+    @Published public var discoveredWirelessDevices: [DiscoveredWirelessDevice] = []
+    @Published public var isScanningWireless = false
     @Published public var isRunning = false
     @Published public var statusMessage = "就绪"
 
@@ -60,20 +62,68 @@ public final class SessionManager: ObservableObject {
         } catch {
             self.statusMessage = "扫描设备失败: \(error.localizedDescription)"
         }
+        await scanWirelessDevices()
     }
 
-    public func connectWifi(ip: String) async {
+    public func scanWirelessDevices() async {
+        guard !isScanningWireless else { return }
+        isScanningWireless = true
+        defer { isScanningWireless = false }
+
         do {
-            statusMessage = "正在通过 Wi-Fi 连接 \(ip):5555 ..."
-            let success = try await ADBManager.shared.connectWifi(ip: ip)
+            let list = try await ADBManager.shared.getMdnsServices()
+            self.discoveredWirelessDevices = list
+        } catch {
+            print("⚠️ [Session] 扫描无线设备失败: \(error.localizedDescription)")
+        }
+    }
+
+    public func connectWifi(ip: String, port: Int = 5555) async {
+        do {
+            statusMessage = "正在通过 Wi-Fi 连接 \(ip):\(port) ..."
+            let success = try await ADBManager.shared.connectWifi(ip: ip, port: port)
             if success {
-                statusMessage = "Wi-Fi 连接成功: \(ip)"
+                statusMessage = "Wi-Fi 连接成功: \(ip):\(port)"
                 await refreshDevices()
             } else {
                 statusMessage = "Wi-Fi 连接未响应，请检查手机 IP 与端口"
             }
         } catch {
             statusMessage = "Wi-Fi 连接失败: \(error.localizedDescription)"
+        }
+    }
+
+    public func pairWirelessDevice(address: String, code: String) async -> Bool {
+        statusMessage = "正在配对设备 \(address) ..."
+        do {
+            let res = try await ADBManager.shared.pairDevice(address: address, code: code)
+            if res.success {
+                statusMessage = "🎉 配对成功: \(address)"
+                await refreshDevices()
+                return true
+            } else {
+                statusMessage = "配对失败: \(res.message)"
+                return false
+            }
+        } catch {
+            statusMessage = "配对异常: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    public func connectDiscoveredWirelessDevice(_ device: DiscoveredWirelessDevice) async {
+        await connectWifi(ip: device.ip, port: device.port)
+    }
+
+    public func switchSelectedDeviceToWireless() async {
+        guard let device = selectedDevice, !device.isWifi else { return }
+        statusMessage = "正在为 \(device.model ?? device.serial) 切换无线免插线模式..."
+        do {
+            let ip = try await ADBManager.shared.switchToWireless(serial: device.serial)
+            statusMessage = "🎉 成功切换为无线投屏模式 (\(ip):5555)！现在可以拔下 USB 数据线。"
+            await refreshDevices()
+        } catch {
+            statusMessage = "切换无线模式失败: \(error.localizedDescription)"
         }
     }
 
