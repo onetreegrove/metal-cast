@@ -129,6 +129,13 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
         }
     }
 
+    /// Access the latest uncompressed raw frame for lossless high-resolution screenshot
+    public func latestFrame() -> CVPixelBuffer? {
+        lock.lock()
+        defer { lock.unlock() }
+        return latestPixelBuffer
+    }
+
     public func draw(in view: MTKView) {
         lock.lock()
         guard let pixelBuffer = latestPixelBuffer else {

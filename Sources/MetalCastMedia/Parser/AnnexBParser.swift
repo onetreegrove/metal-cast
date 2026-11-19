@@ -45,21 +45,26 @@ public final class AnnexBParser: @unchecked Sendable {
         }
     }
 
+    /// Zero-copy search for NAL start code (0x000001 or 0x00000001)
     private func findStartCode(in data: Data, offset: Int) -> (len: Int, index: Int)? {
         guard data.count >= offset + 3 else { return nil }
-        let bytes = [UInt8](data)
 
-        for i in offset..<(bytes.count - 2) {
-            if bytes[i] == 0 && bytes[i+1] == 0 {
-                if bytes[i+2] == 1 {
-                    return (3, i)
-                }
-                if i + 3 < bytes.count && bytes[i+2] == 0 && bytes[i+3] == 1 {
-                    return (4, i)
+        return data.withUnsafeBytes { rawBuffer -> (len: Int, index: Int)? in
+            guard let bytes = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return nil }
+            let count = data.count
+
+            for i in offset..<(count - 2) {
+                if bytes[i] == 0 && bytes[i + 1] == 0 {
+                    if bytes[i + 2] == 1 {
+                        return (3, i)
+                    }
+                    if i + 3 < count && bytes[i + 2] == 0 && bytes[i + 3] == 1 {
+                        return (4, i)
+                    }
                 }
             }
+            return nil
         }
-        return nil
     }
 
     private func processNALU(_ nalu: Data) {
@@ -202,9 +207,12 @@ public final class AnnexBParser: @unchecked Sendable {
         }
 
         var sampleBuffer: CMSampleBuffer?
+        // Use Apple CoreMedia Host Time Clock for accurate timing across Apple Silicon and Intel
+        let hostClock = CMClockGetHostTimeClock()
+        let currentTime = CMClockGetTime(hostClock)
         var sampleTiming = CMSampleTimingInfo(
             duration: .invalid,
-            presentationTimeStamp: CMTime(value: Int64(mach_absolute_time()), timescale: 1_000_000_000),
+            presentationTimeStamp: currentTime,
             decodeTimeStamp: .invalid
         )
 

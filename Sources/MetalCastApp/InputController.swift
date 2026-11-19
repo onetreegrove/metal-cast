@@ -14,7 +14,7 @@ public final class InputController: @unchecked Sendable {
     }
 
     /// Converts view point (top-left origin if flipped) to Android coordinates
-    public func mapPoint(_ point: CGPoint, in viewSize: CGSize) -> ControlMessage.Point? {
+    public func mapPoint(_ point: CGPoint, in viewSize: CGSize, clamped: Bool = false) -> ControlMessage.Point? {
         guard deviceSize.width > 0 && deviceSize.height > 0,
               viewSize.width > 0 && viewSize.height > 0 else { return nil }
 
@@ -36,12 +36,17 @@ public final class InputController: @unchecked Sendable {
             offsetY = (viewSize.height - videoHeight) / 2.0
         }
 
-        let relativeX = point.x - offsetX
-        let relativeY = point.y - offsetY
+        var relativeX = point.x - offsetX
+        var relativeY = point.y - offsetY
 
-        guard relativeX >= 0 && relativeX <= videoWidth &&
-              relativeY >= 0 && relativeY <= videoHeight else {
-            return nil
+        if clamped {
+            relativeX = max(0, min(videoWidth, relativeX))
+            relativeY = max(0, min(videoHeight, relativeY))
+        } else {
+            guard relativeX >= 0 && relativeX <= videoWidth &&
+                  relativeY >= 0 && relativeY <= videoHeight else {
+                return nil
+            }
         }
 
         let androidX = Int32((relativeX / videoWidth) * deviceSize.width)
@@ -54,19 +59,19 @@ public final class InputController: @unchecked Sendable {
     private let genericFingerId: UInt64 = 0xFFFFFFFFFFFFFFFE
 
     public func handleMouseDown(at point: CGPoint, in viewSize: CGSize) {
-        guard let androidPoint = mapPoint(point, in: viewSize) else { return }
+        guard let androidPoint = mapPoint(point, in: viewSize, clamped: false) else { return }
         let res = ControlMessage.Size(width: UInt16(deviceSize.width), height: UInt16(deviceSize.height))
         connection?.sendControlMessage(.injectTouch(action: .down, pointerId: genericFingerId, position: androidPoint, resolution: res))
     }
 
     public func handleMouseDragged(to point: CGPoint, in viewSize: CGSize) {
-        guard let androidPoint = mapPoint(point, in: viewSize) else { return }
+        guard let androidPoint = mapPoint(point, in: viewSize, clamped: true) else { return }
         let res = ControlMessage.Size(width: UInt16(deviceSize.width), height: UInt16(deviceSize.height))
         connection?.sendControlMessage(.injectTouch(action: .move, pointerId: genericFingerId, position: androidPoint, resolution: res))
     }
 
     public func handleMouseUp(at point: CGPoint, in viewSize: CGSize) {
-        let androidPoint = mapPoint(point, in: viewSize) ?? ControlMessage.Point(x: 0, y: 0)
+        let androidPoint = mapPoint(point, in: viewSize, clamped: true) ?? ControlMessage.Point(x: 0, y: 0)
         let res = ControlMessage.Size(width: UInt16(deviceSize.width), height: UInt16(deviceSize.height))
         connection?.sendControlMessage(.injectTouch(action: .up, pointerId: genericFingerId, position: androidPoint, resolution: res))
     }

@@ -6,7 +6,7 @@ public final class AudioPlayer: @unchecked Sendable {
     private var isRunning = false
     private let lock = NSLock()
     private var bufferPool: [AudioQueueBufferRef] = []
-    private let bufferSize: UInt32 = 4096 * 4 // ~16KB chunks
+    private let bufferSize: UInt32 = 32768 // 32KB per buffer
     public var isMuted: Bool = false {
         didSet {
             updateVolume()
@@ -60,8 +60,8 @@ public final class AudioPlayer: @unchecked Sendable {
             return
         }
 
-        // Pre-allocate 4 buffers in pool
-        for _ in 0..<4 {
+        // Pre-allocate 6 buffers in pool
+        for _ in 0..<6 {
             var buffer: AudioQueueBufferRef?
             if AudioQueueAllocateBuffer(queue, bufferSize, &buffer) == noErr, let buf = buffer {
                 bufferPool.append(buf)
@@ -71,8 +71,13 @@ public final class AudioPlayer: @unchecked Sendable {
 
     private func handleBufferCompleted(buffer: AudioQueueBufferRef) {
         lock.lock()
-        bufferPool.append(buffer)
-        lock.unlock()
+        defer { lock.unlock() }
+
+        if bufferPool.count < 12 {
+            bufferPool.append(buffer)
+        } else if let queue = audioQueue {
+            AudioQueueFreeBuffer(queue, buffer)
+        }
     }
 
     private func updateVolume() {
@@ -85,18 +90,18 @@ public final class AudioPlayer: @unchecked Sendable {
         guard let queue = audioQueue, !data.isEmpty else { return }
 
         lock.lock()
-        guard let buffer = bufferPool.popLast() else {
+        if let buffer = bufferPool.popLast() {
             lock.unlock()
-            // Buffer pool exhausted; allocate a dynamic buffer if needed
-            var dynamicBuffer: AudioQueueBufferRef?
-            let allocStatus = AudioQueueAllocateBuffer(queue, UInt32(data.count), &dynamicBuffer)
-            guard allocStatus == noErr, let buf = dynamicBuffer else { return }
-            fillAndEnqueue(buffer: buf, with: data, queue: queue)
+            fillAndEnqueue(buffer: buffer, with: data, queue: queue)
             return
         }
         lock.unlock()
 
-        fillAndEnqueue(buffer: buffer, with: data, queue: queue)
+        // Allocate a new standard buffer if needed
+        var dynamicBuffer: AudioQueueBufferRef?
+        let allocStatus = AudioQueueAllocateBuffer(queue, max(bufferSize, UInt32(data.count)), &dynamicBuffer)
+        guard allocStatus == noErr, let buf = dynamicBuffer else { return }
+        fillAndEnqueue(buffer: buf, with: data, queue: queue)
     }
 
     private func fillAndEnqueue(buffer: AudioQueueBufferRef, with data: Data, queue: AudioQueueRef) {

@@ -166,12 +166,19 @@ public actor ADBManager {
             throw NSError(domain: "MetalCast", code: -2, userInfo: [NSLocalizedDescriptionKey: "执行 adb tcpip \(port) 失败，请确保 USB 调试已授权"])
         }
 
-        // Wait brief moment for ADB daemon on device to restart in TCP mode
-        try await Task.sleep(nanoseconds: 1_200_000_000)
+        // Wait for ADB daemon on device to restart in TCP mode (with retry)
+        var connected = false
+        for attempt in 1...3 {
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            if (try? await connectWifi(ip: ip, port: port)) == true {
+                connected = true
+                break
+            }
+            print("🔄 [ADBManager] 尝试连接无线设备 \(ip):\(port) (第 \(attempt)/3 次)...")
+        }
 
-        let connectSuccess = try await connectWifi(ip: ip, port: port)
-        guard connectSuccess else {
-            throw NSError(domain: "MetalCast", code: -3, userInfo: [NSLocalizedDescriptionKey: "无法连接无线设备 \(ip):\(port)"])
+        guard connected else {
+            throw NSError(domain: "MetalCast", code: -3, userInfo: [NSLocalizedDescriptionKey: "无法连接无线设备 \(ip):\(port)，请检查手机是否与 Mac 处于同一 Wi-Fi 子网并允许无线访问"])
         }
 
         return ip

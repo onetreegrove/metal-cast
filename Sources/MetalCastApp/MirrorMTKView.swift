@@ -6,6 +6,7 @@ import MetalCastMedia
 public final class MirrorMTKView: MTKView, NSTextInputClient {
     public let inputController = InputController()
     public var serial: String = ""
+    private var markedTextStorage: String = ""
 
     public override var isFlipped: Bool { true }
     public override var acceptsFirstResponder: Bool { true }
@@ -65,7 +66,13 @@ public final class MirrorMTKView: MTKView, NSTextInputClient {
             return
         }
 
-        // 2. Hardware / navigation keys
+        // 2. If IME is composing, let Cocoa IME handle all keys (including Space, Enter, Backspace)
+        if hasMarkedText() {
+            interpretKeyEvents([event])
+            return
+        }
+
+        // 3. Hardware / navigation keys when NOT composing in IME
         switch event.keyCode {
         case 36: // Enter / Return
             inputController.sendKeycode(66) // AKEYCODE_ENTER
@@ -75,8 +82,6 @@ public final class MirrorMTKView: MTKView, NSTextInputClient {
             inputController.sendBack()       // AKEYCODE_BACK (4)
         case 48: // Tab
             inputController.sendKeycode(61) // AKEYCODE_TAB
-        case 49: // Space
-            inputController.sendKeycode(62) // AKEYCODE_SPACE
         case 123: // Left Arrow
             inputController.sendKeycode(21) // AKEYCODE_DPAD_LEFT
         case 124: // Right Arrow
@@ -86,7 +91,7 @@ public final class MirrorMTKView: MTKView, NSTextInputClient {
         case 126: // Up Arrow
             inputController.sendKeycode(19) // AKEYCODE_DPAD_UP
         default:
-            // 3. Forward to Cocoa Text Input Manager (handles Chinese IME & direct text typing)
+            // 4. Forward to Cocoa Text Input Manager (handles letters, digits, punctuation, and IME activation)
             interpretKeyEvents([event])
         }
     }
@@ -94,6 +99,7 @@ public final class MirrorMTKView: MTKView, NSTextInputClient {
     // MARK: - NSTextInputClient (macOS IME & Typed Text Forwarding)
 
     public func insertText(_ string: Any, replacementRange: NSRange) {
+        markedTextStorage = ""
         let text: String
         if let str = string as? String {
             text = str
@@ -108,21 +114,27 @@ public final class MirrorMTKView: MTKView, NSTextInputClient {
     }
 
     public func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-        // Intermediate composing text from IME
+        if let str = string as? String {
+            markedTextStorage = str
+        } else if let attrStr = string as? NSAttributedString {
+            markedTextStorage = attrStr.string
+        }
     }
 
-    public func unmarkText() {}
+    public func unmarkText() {
+        markedTextStorage = ""
+    }
 
     public func selectedRange() -> NSRange {
         return NSRange(location: NSNotFound, length: 0)
     }
 
     public func markedRange() -> NSRange {
-        return NSRange(location: NSNotFound, length: 0)
+        return markedTextStorage.isEmpty ? NSRange(location: NSNotFound, length: 0) : NSRange(location: 0, length: (markedTextStorage as NSString).length)
     }
 
     public func hasMarkedText() -> Bool {
-        return false
+        return !markedTextStorage.isEmpty
     }
 
     public func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {

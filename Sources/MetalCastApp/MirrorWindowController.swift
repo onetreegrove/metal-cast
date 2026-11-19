@@ -302,37 +302,48 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
     }
 
     public func toolbarDidClickScreenshot() {
-        guard let window = self.window else { return }
+        var capturedCGImage: CGImage?
 
-        // Capture only the mtkView video area (excluding toolbar)
-        let videoRect = window.convertToScreen(mtkView.convert(mtkView.bounds, to: nil))
-        guard let screen = window.screen else { return }
-        let screenRect = screen.frame
-        let cgRect = CGRect(
-            x: videoRect.origin.x,
-            y: screenRect.height - (videoRect.origin.y + videoRect.height),
-            width: videoRect.width,
-            height: videoRect.height
-        )
+        // 1. Preferred lossless path: directly grab the full-resolution decoded CVPixelBuffer
+        if let pixelBuffer = renderer?.latestFrame() {
+            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+            let context = CIContext()
+            capturedCGImage = context.createCGImage(ciImage, from: ciImage.extent)
+        }
 
-        if let cgImage = CGWindowListCreateImage(cgRect, .optionIncludingWindow, CGWindowID(window.windowNumber), [.boundsIgnoreFraming, .bestResolution]) {
-            let nsImage = NSImage(cgImage: cgImage, size: videoRect.size)
-
-            // 1. Copy to NSPasteboard
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.writeObjects([nsImage])
-
-            // 2. Save PNG to Desktop
-            if let tiffData = nsImage.tiffRepresentation,
-               let bitmap = NSBitmapImageRep(data: tiffData),
-               let pngData = bitmap.representation(using: .png, properties: [:]) {
-                let formatter = DateFormatter()
-                formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-                let dateStr = formatter.string(from: Date())
-                let desktopUrl = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop/MetalCast_\(dateStr).png")
-                try? pngData.write(to: desktopUrl)
-                print("📸 [Screenshot] 手机画面纯净截图已保存至桌面: \(desktopUrl.path)")
+        // 2. Fallback path if no frame buffer yet
+        if capturedCGImage == nil, let window = self.window {
+            let videoRect = window.convertToScreen(mtkView.convert(mtkView.bounds, to: nil))
+            if let screen = window.screen {
+                let screenRect = screen.frame
+                let cgRect = CGRect(
+                    x: videoRect.origin.x,
+                    y: screenRect.height - (videoRect.origin.y + videoRect.height),
+                    width: videoRect.width,
+                    height: videoRect.height
+                )
+                capturedCGImage = CGWindowListCreateImage(cgRect, .optionIncludingWindow, CGWindowID(window.windowNumber), [.boundsIgnoreFraming, .bestResolution])
             }
+        }
+
+        guard let cgImage = capturedCGImage else { return }
+        let imageSize = NSSize(width: cgImage.width, height: cgImage.height)
+        let nsImage = NSImage(cgImage: cgImage, size: imageSize)
+
+        // 1. Copy to NSPasteboard
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects([nsImage])
+
+        // 2. Save PNG to Desktop
+        if let tiffData = nsImage.tiffRepresentation,
+           let bitmap = NSBitmapImageRep(data: tiffData),
+           let pngData = bitmap.representation(using: .png, properties: [:]) {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+            let dateStr = formatter.string(from: Date())
+            let desktopUrl = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop/MetalCast_\(dateStr).png")
+            try? pngData.write(to: desktopUrl)
+            print("📸 [Screenshot] 手机原画级无损截图已保存至桌面: \(desktopUrl.path) (\(cgImage.width)x\(cgImage.height))")
         }
     }
 

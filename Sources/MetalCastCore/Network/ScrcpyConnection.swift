@@ -24,6 +24,7 @@ public final class ScrcpyConnection: @unchecked Sendable {
     private var controlBuffer = Data()
     private var isHeaderReceived = false
     private var isAudioHeaderReceived = false
+    private var hasDisconnected = false
 
     public init(port: UInt16 = 27183, audioEnabled: Bool = true) {
         self.port = port
@@ -242,6 +243,8 @@ public final class ScrcpyConnection: @unchecked Sendable {
     }
 
     private func handleDisconnect() {
+        guard !hasDisconnected else { return }
+        hasDisconnected = true
         onDisconnected?()
     }
 
@@ -255,12 +258,14 @@ public final class ScrcpyConnection: @unchecked Sendable {
             self?.audioConnection = nil
             self?.controlConnection?.cancel()
             self?.controlConnection = nil
+            self?.incomingConnections.forEach { $0.cancel() }
             self?.incomingConnections.removeAll()
             self?.videoBuffer.removeAll()
             self?.audioBuffer.removeAll()
             self?.controlBuffer.removeAll()
             self?.isHeaderReceived = false
             self?.isAudioHeaderReceived = false
+            self?.hasDisconnected = false
         }
     }
 }
