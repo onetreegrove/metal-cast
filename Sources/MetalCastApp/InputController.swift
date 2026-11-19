@@ -86,38 +86,41 @@ public final class InputController: @unchecked Sendable {
 
     public func sendBack() {
         // Android KEYCODE_BACK = 4
-        connection?.sendControlMessage(.injectKeycode(action: .down, keycode: 4))
-        connection?.sendControlMessage(.injectKeycode(action: .up, keycode: 4))
+        sendKeycode(4)
     }
 
     public func sendHome() {
         // Android KEYCODE_HOME = 3
-        connection?.sendControlMessage(.injectKeycode(action: .down, keycode: 3))
-        connection?.sendControlMessage(.injectKeycode(action: .up, keycode: 3))
+        sendKeycode(3)
     }
 
     public func sendAppSwitch() {
         // Android KEYCODE_APP_SWITCH = 187
-        connection?.sendControlMessage(.injectKeycode(action: .down, keycode: 187))
-        connection?.sendControlMessage(.injectKeycode(action: .up, keycode: 187))
+        sendKeycode(187)
     }
 
     public func sendVolumeUp() {
         // Android KEYCODE_VOLUME_UP = 24
-        connection?.sendControlMessage(.injectKeycode(action: .down, keycode: 24))
-        connection?.sendControlMessage(.injectKeycode(action: .up, keycode: 24))
+        sendKeycode(24)
     }
 
     public func sendVolumeDown() {
         // Android KEYCODE_VOLUME_DOWN = 25
-        connection?.sendControlMessage(.injectKeycode(action: .down, keycode: 25))
-        connection?.sendControlMessage(.injectKeycode(action: .up, keycode: 25))
+        sendKeycode(25)
     }
 
     public func sendPower() {
         // Android KEYCODE_POWER = 26
-        connection?.sendControlMessage(.injectKeycode(action: .down, keycode: 26))
-        connection?.sendControlMessage(.injectKeycode(action: .up, keycode: 26))
+        sendKeycode(26)
+    }
+
+    public func sendText(_ text: String) {
+        connection?.sendControlMessage(.injectText(text: text))
+    }
+
+    public func sendKeycode(_ keycode: UInt32, metaState: UInt32 = 0) {
+        connection?.sendControlMessage(.injectKeycode(action: .down, keycode: keycode, metaState: metaState))
+        connection?.sendControlMessage(.injectKeycode(action: .up, keycode: keycode, metaState: metaState))
     }
 
     public func setScreenPower(on: Bool) {

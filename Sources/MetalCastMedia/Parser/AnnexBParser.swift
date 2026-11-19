@@ -1,8 +1,16 @@
 import Foundation
 import CoreMedia
 
+public enum VideoCodec: String, Sendable {
+    case h264 = "h264"
+    case h265 = "h265"
+}
+
 public final class AnnexBParser: @unchecked Sendable {
+    public var codec: VideoCodec = .h264
+
     private var buffer = Data()
+    private var vps: Data? // For H.265 (HEVC)
     private var sps: Data?
     private var pps: Data?
 
@@ -11,9 +19,11 @@ public final class AnnexBParser: @unchecked Sendable {
 
     private var currentFormatDesc: CMVideoFormatDescription?
 
-    public init() {}
+    public init(codec: VideoCodec = .h264) {
+        self.codec = codec
+    }
 
-    /// Consumes raw chunk from H.264 video socket
+    /// Consumes raw chunk from H.264/H.265 video socket
     public func parse(chunk: Data) {
         buffer.append(chunk)
 
@@ -54,54 +64,111 @@ public final class AnnexBParser: @unchecked Sendable {
 
     private func processNALU(_ nalu: Data) {
         guard !nalu.isEmpty else { return }
-        let nalType = nalu[0] & 0x1F
 
-        switch nalType {
-        case 7: // SPS
-            sps = nalu
-            tryBuildFormatDescription()
-        case 8: // PPS
-            pps = nalu
-            tryBuildFormatDescription()
-        case 1, 5: // Non-IDR (1) or IDR (5) Slice
-            guard let formatDesc = currentFormatDesc else { return }
-            createSampleBuffer(from: nalu, formatDesc: formatDesc)
-        default:
-            break
+        switch codec {
+        case .h264:
+            let nalType = nalu[0] & 0x1F
+            switch nalType {
+            case 7: // SPS
+                sps = nalu
+                tryBuildFormatDescription()
+            case 8: // PPS
+                pps = nalu
+                tryBuildFormatDescription()
+            case 1, 5: // Non-IDR (1) or IDR (5) Slice
+                guard let formatDesc = currentFormatDesc else { return }
+                createSampleBuffer(from: nalu, formatDesc: formatDesc)
+            default:
+                break
+            }
+
+        case .h265:
+            let nalType = (nalu[0] >> 1) & 0x3F
+            switch nalType {
+            case 32: // VPS (Video Parameter Set)
+                vps = nalu
+                tryBuildFormatDescription()
+            case 33: // SPS
+                sps = nalu
+                tryBuildFormatDescription()
+            case 34: // PPS
+                pps = nalu
+                tryBuildFormatDescription()
+            case 0...31: // VCL Slices (IDR, CRA, Non-IDR)
+                guard let formatDesc = currentFormatDesc else { return }
+                createSampleBuffer(from: nalu, formatDesc: formatDesc)
+            default:
+                break
+            }
         }
     }
 
     private func tryBuildFormatDescription() {
-        guard let sps = sps, let pps = pps else { return }
+        switch codec {
+        case .h264:
+            guard let sps = sps, let pps = pps else { return }
+            sps.withUnsafeBytes { spsPtr in
+                pps.withUnsafeBytes { ppsPtr in
+                    guard let spsBase = spsPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                          let ppsBase = ppsPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
 
-        sps.withUnsafeBytes { spsPtr in
-            pps.withUnsafeBytes { ppsPtr in
-                guard let spsBase = spsPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                      let ppsBase = ppsPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+                    let parameterSets = [spsBase, ppsBase]
+                    let parameterSetSizes = [sps.count, pps.count]
 
-                let parameterSets = [spsBase, ppsBase]
-                let parameterSetSizes = [sps.count, pps.count]
+                    var newFormatDesc: CMVideoFormatDescription?
+                    let status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                        allocator: kCFAllocatorDefault,
+                        parameterSetCount: 2,
+                        parameterSetPointers: parameterSets,
+                        parameterSetSizes: parameterSetSizes,
+                        nalUnitHeaderLength: 4,
+                        formatDescriptionOut: &newFormatDesc
+                    )
 
-                var newFormatDesc: CMVideoFormatDescription?
-                let status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
-                    allocator: kCFAllocatorDefault,
-                    parameterSetCount: 2,
-                    parameterSetPointers: parameterSets,
-                    parameterSetSizes: parameterSetSizes,
-                    nalUnitHeaderLength: 4,
-                    formatDescriptionOut: &newFormatDesc
-                )
+                    if status == noErr, let desc = newFormatDesc {
+                        self.currentFormatDesc = desc
+                        self.onFormatDescription?(desc)
+                    }
+                }
+            }
 
-                if status == noErr, let desc = newFormatDesc {
-                    self.currentFormatDesc = desc
-                    self.onFormatDescription?(desc)
+        case .h265:
+            guard let vps = vps, let sps = sps, let pps = pps else { return }
+            vps.withUnsafeBytes { vpsPtr in
+                sps.withUnsafeBytes { spsPtr in
+                    pps.withUnsafeBytes { ppsPtr in
+                        guard let vpsBase = vpsPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                              let spsBase = spsPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                              let ppsBase = ppsPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+
+                        let parameterSets = [vpsBase, spsBase, ppsBase]
+                        let parameterSetSizes = [vps.count, sps.count, pps.count]
+
+                        var newFormatDesc: CMVideoFormatDescription?
+                        let status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                            allocator: kCFAllocatorDefault,
+                            parameterSetCount: 3,
+                            parameterSetPointers: parameterSets,
+                            parameterSetSizes: parameterSetSizes,
+                            nalUnitHeaderLength: 4,
+                            extensions: nil,
+                            formatDescriptionOut: &newFormatDesc
+                        )
+
+                        if status == noErr, let desc = newFormatDesc {
+                            self.currentFormatDesc = desc
+                            self.onFormatDescription?(desc)
+                        } else {
+                            print("❌ [AnnexBParser] 构建 HEVC 格式描述失败: \(status)")
+                        }
+                    }
                 }
             }
         }
     }
 
     private func createSampleBuffer(from nalu: Data, formatDesc: CMVideoFormatDescription) {
-        // Build AVCC: 4-byte big endian length prefix followed by NALU bytes
+        // Build AVCC/HVCC: 4-byte big endian length prefix followed by NALU bytes
         var lengthPrefix = UInt32(nalu.count).bigEndian
         var avccData = Data(bytes: &lengthPrefix, count: 4)
         avccData.append(nalu)

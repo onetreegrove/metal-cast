@@ -10,6 +10,7 @@ public protocol DockToolbarDelegate: AnyObject {
     func toolbarDidClickHome()
     func toolbarDidClickRecents()
     func toolbarDidToggleScreenPower(_ isOff: Bool)
+    func toolbarDidToggleAudioMute(_ isMuted: Bool)
     func toolbarDidClickScreenshot()
     func toolbarDidClickVolumeUp()
     func toolbarDidClickVolumeDown()
@@ -24,7 +25,9 @@ public final class DockToolbarView: NSVisualEffectView {
     public private(set) var position: DockToolbarPosition = .right
 
     private var isScreenOff = false
+    private var isAudioMuted = false
     private var moonButton: NSButton?
+    private var audioMuteButton: NSButton?
     private var stackView: NSStackView!
     private var borderLine: NSBox!
 
@@ -151,6 +154,17 @@ public final class DockToolbarView: NSVisualEffectView {
             self?.delegate?.toolbarDidClickVolumeDown()
         }
 
+        let muteBtn = createButton(systemName: isAudioMuted ? "speaker.slash.fill" : "speaker.wave.2.fill", fallbackText: "🔈", tooltip: isAudioMuted ? "取消静音 (Mac 音频播放)" : "静音 (关闭 Mac 音频播放)") { [weak self] in
+            guard let self = self else { return }
+            self.isAudioMuted.toggle()
+            self.delegate?.toolbarDidToggleAudioMute(self.isAudioMuted)
+            self.audioMuteButton?.image = NSImage(systemSymbolName: self.isAudioMuted ? "speaker.slash.fill" : "speaker.wave.2.fill", accessibilityDescription: nil)
+            self.audioMuteButton?.contentTintColor = self.isAudioMuted ? .systemRed : .labelColor
+            self.audioMuteButton?.toolTip = self.isAudioMuted ? "取消静音 (Mac 音频播放)" : "静音 (关闭 Mac 音频播放)"
+        }
+        muteBtn.contentTintColor = isAudioMuted ? .systemRed : .labelColor
+        self.audioMuteButton = muteBtn
+
         let powerBtn = createButton(systemName: "power", fallbackText: "⚡️", tooltip: "电源 / 锁屏键") { [weak self] in
             self?.delegate?.toolbarDidClickPower()
         }
@@ -173,7 +187,7 @@ public final class DockToolbarView: NSVisualEffectView {
         let items: [NSView] = [
             backBtn, homeBtn, recentsBtn,
             sep1,
-            screenBtn, snapBtn, volUpBtn, volDownBtn, powerBtn,
+            screenBtn, snapBtn, volUpBtn, volDownBtn, muteBtn, powerBtn,
             sep2,
             fullBtn, posBtn, hideBtn
         ]

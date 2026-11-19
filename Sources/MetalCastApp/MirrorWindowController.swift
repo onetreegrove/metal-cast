@@ -284,6 +284,11 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
         mtkView.inputController.setScreenPower(on: !isOff)
     }
 
+    public func toolbarDidToggleAudioMute(_ isMuted: Bool) {
+        print("🔇 [AudioMute] 音频静音状态切换: \(isMuted ? "静音" : "开启声音")")
+        SessionManager.shared.setAudioMuted(isMuted)
+    }
+
     public func toolbarDidClickVolumeUp() {
         mtkView.inputController.sendVolumeUp()
     }

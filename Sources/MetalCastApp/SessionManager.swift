@@ -13,8 +13,10 @@ public final class SessionManager: ObservableObject {
     @Published public var statusMessage = "就绪"
 
     @Published public var selectedResolution: UInt16 = 0 // 0 = 原生
-    @Published public var selectedFps: UInt16 = 0        // 0 = 自适应，防止特定芯片挂起
+    @Published public var selectedFps: UInt16 = 0        // 0 = 自适应
     @Published public var selectedBitrate: UInt32 = 16_000_000
+    @Published public var selectedCodec: String = "h264" // "h264" 或 "h265"
+    @Published public var isAudioEnabled: Bool = true    // 低延迟音频转发开关
     @Published public var screenOffOnStart: Bool = false
 
     private var activeConnection: ScrcpyConnection?
@@ -24,6 +26,7 @@ public final class SessionManager: ObservableObject {
     private var currentSerial: String?
     private var currentParser: AnnexBParser?
     private var currentDecoder: VTDecoder?
+    private var audioPlayer: AudioPlayer?
 
     public init() {}
 
@@ -74,6 +77,10 @@ public final class SessionManager: ObservableObject {
         }
     }
 
+    public func setAudioMuted(_ isMuted: Bool) {
+        audioPlayer?.isMuted = isMuted
+    }
+
     public func startMirroring() async {
         guard let device = selectedDevice, device.state == .device else {
             statusMessage = "请先选择已连接且授权的 Android 设备"
@@ -104,11 +111,19 @@ public final class SessionManager: ObservableObject {
 
             try await ADBManager.shared.reverse(serial: device.serial, remoteSocket: socketName, localPort: localPort)
 
-            // 3. 构建解码流水线并强引用持久化
-            let parser = AnnexBParser()
+            // 3. 构建解码流水线与音频输出
+            let targetVideoCodec: VideoCodec = (selectedCodec == "h265") ? .h265 : .h264
+            let parser = AnnexBParser(codec: targetVideoCodec)
             let decoder = VTDecoder()
             self.currentParser = parser
             self.currentDecoder = decoder
+
+            var localAudioPlayer: AudioPlayer?
+            if isAudioEnabled {
+                let player = AudioPlayer()
+                self.audioPlayer = player
+                localAudioPlayer = player
+            }
 
             let winController = MirrorWindowController(serial: device.serial, deviceName: device.model ?? "Android")
             self.mirrorWindowController = winController
@@ -137,12 +152,12 @@ public final class SessionManager: ObservableObject {
             }
 
             // 4. 建立 TCP 服务
-            let connection = ScrcpyConnection(port: localPort)
+            let connection = ScrcpyConnection(port: localPort, audioEnabled: isAudioEnabled)
             self.activeConnection = connection
             winController.attachConnection(connection)
 
-            connection.onDeviceName = { [weak winController] name, w, h in
-                print("🎉 [Session] 成功握手设备: \(name) (\(w)x\(h))")
+            connection.onDeviceName = { [weak winController] name, codec, w, h in
+                print("🎉 [Session] 成功握手设备: \(name) (\(codec), \(w)x\(h))")
                 DispatchQueue.main.async {
                     winController?.updateResolution(width: w, height: h)
                 }
@@ -150,6 +165,12 @@ public final class SessionManager: ObservableObject {
 
             connection.onVideoData = { chunk in
                 parser.parse(chunk: chunk)
+            }
+
+            if let audioP = localAudioPlayer {
+                connection.onAudioData = { chunk in
+                    audioP.enqueue(data: chunk)
+                }
             }
 
             connection.onDeviceMessage = { msg in
@@ -177,6 +198,10 @@ public final class SessionManager: ObservableObject {
                 maxSize: selectedResolution,
                 bitRate: selectedBitrate,
                 maxFps: selectedFps,
+                control: true,
+                audio: isAudioEnabled,
+                audioCodec: "raw",
+                videoCodec: selectedCodec,
                 scid: scid,
                 onLog: { log in
                     let clean = log.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -200,7 +225,7 @@ public final class SessionManager: ObservableObject {
             winController.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
 
-            statusMessage = "投屏运行中 (端到端延迟 ~35ms)"
+            statusMessage = "投屏运行中 (音频: \(isAudioEnabled ? "开启" : "关闭"), 编码: \(selectedCodec.uppercased()))"
 
         } catch {
             statusMessage = "启动失败: \(error.localizedDescription)"
@@ -211,6 +236,9 @@ public final class SessionManager: ObservableObject {
     public func stopMirroring() {
         guard isRunning else { return }
         print("🛑 [Session] 正在停止投屏会话...")
+
+        audioPlayer?.stop()
+        audioPlayer = nil
 
         ClipboardManager.shared.stopMonitoring()
         activeConnection?.stop()

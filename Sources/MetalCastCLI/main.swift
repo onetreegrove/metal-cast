@@ -88,8 +88,8 @@ struct MetalCastCLI {
 
             // 4. 启动本地 TCP 监听
             let connection = ScrcpyConnection(port: localPort)
-            connection.onDeviceName = { name, w, h in
-                print("🎉 [Scrcpy] 成功握手设备: \(name) (\(w)x\(h))")
+            connection.onDeviceName = { name, codec, w, h in
+                print("🎉 [Scrcpy] 成功握手设备: \(name) (\(codec), \(w)x\(h))")
             }
 
             connection.onVideoData = { chunk in

@@ -99,6 +99,9 @@ public actor ADBManager {
         maxFps: UInt16 = 120,
         tunnelForward: Bool = false,
         control: Bool = true,
+        audio: Bool = true,
+        audioCodec: String = "raw",
+        videoCodec: String = "h264",
         scid: UInt32? = nil,
         onLog: (@Sendable (String) -> Void)? = nil
     ) throws -> Process {
@@ -109,11 +112,16 @@ public actor ADBManager {
             "com.genymobile.scrcpy.Server",
             version,
             "video_bit_rate=\(bitRate)",
-            "audio=false",
+            "video_codec=\(videoCodec)",
+            "audio=\(audio)",
             "control=\(control)",
             "stay_awake=true",
             "log_level=debug"
         ]
+
+        if audio {
+            args.append("audio_codec=\(audioCodec)")
+        }
 
         if let scid = scid {
             let hexScid = String(format: "%08x", scid)

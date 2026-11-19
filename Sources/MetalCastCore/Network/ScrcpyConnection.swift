@@ -3,24 +3,31 @@ import Network
 
 public final class ScrcpyConnection: @unchecked Sendable {
     public let port: UInt16
+    public let audioEnabled: Bool
+
     private var listener: NWListener?
     private var videoConnection: NWConnection?
+    private var audioConnection: NWConnection?
     private var controlConnection: NWConnection?
 
     private let queue = DispatchQueue(label: "com.macscrcpy.connection", qos: .userInteractive)
 
-    public var onDeviceName: (@Sendable (String, Int, Int) -> Void)?
+    public var onDeviceName: (@Sendable (_ name: String, _ codec: String, _ width: Int, _ height: Int) -> Void)?
     public var onVideoData: (@Sendable (Data) -> Void)?
+    public var onAudioData: (@Sendable (Data) -> Void)?
     public var onDeviceMessage: (@Sendable (DeviceMessage) -> Void)?
     public var onDisconnected: (@Sendable () -> Void)?
 
     private var incomingConnections: [NWConnection] = []
     private var videoBuffer = Data()
+    private var audioBuffer = Data()
     private var controlBuffer = Data()
     private var isHeaderReceived = false
+    private var isAudioHeaderReceived = false
 
-    public init(port: UInt16 = 27183) {
+    public init(port: UInt16 = 27183, audioEnabled: Bool = true) {
         self.port = port
+        self.audioEnabled = audioEnabled
     }
 
     /// Starts listening for incoming connections from scrcpy-server
@@ -42,9 +49,9 @@ public final class ScrcpyConnection: @unchecked Sendable {
         newListener.stateUpdateHandler = { state in
             switch state {
             case .ready:
-                print("[ScrcpyConnection] Listening on port \(nwPort)")
+                print("[ScrcpyConnection] 正在端口 \(nwPort) 监听连接 (Audio: \(self.audioEnabled ? "开启" : "关闭"))")
             case .failed(let error):
-                print("[ScrcpyConnection] Listener failed: \(error)")
+                print("[ScrcpyConnection] 监听器失败: \(error)")
             default:
                 break
             }
@@ -64,7 +71,10 @@ public final class ScrcpyConnection: @unchecked Sendable {
             if index == 1 {
                 self.videoConnection = connection
                 self.readVideoStream(connection)
-            } else if index == 2 {
+            } else if self.audioEnabled && index == 2 {
+                self.audioConnection = connection
+                self.readAudioStream(connection)
+            } else if (!self.audioEnabled && index == 2) || (self.audioEnabled && index == 3) {
                 self.controlConnection = connection
                 self.readControlStream(connection)
             }
@@ -81,7 +91,7 @@ public final class ScrcpyConnection: @unchecked Sendable {
             }
 
             if isComplete || error != nil {
-                print("[Socket #1] 连接关闭或出错: \(String(describing: error))")
+                print("[Video Socket #1] 连接关闭或出错: \(String(describing: error))")
                 self.handleDisconnect()
             } else {
                 self.readVideoStream(connection)
@@ -98,12 +108,16 @@ public final class ScrcpyConnection: @unchecked Sendable {
             let deviceName = String(data: nameData, encoding: .utf8)?
                 .trimmingCharacters(in: CharacterSet(["\0", " "])) ?? "Android Device"
 
+            let codecData = videoBuffer.subdata(in: 64..<68)
+            let codecStr = String(data: codecData, encoding: .ascii)?.trimmingCharacters(in: CharacterSet(["\0", " "])) ?? "h264"
+
             let width = Int(videoBuffer.subdata(in: 72..<76).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
             let height = Int(videoBuffer.subdata(in: 76..<80).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
 
             videoBuffer.removeSubrange(0..<80)
             isHeaderReceived = true
-            onDeviceName?(deviceName, width, height)
+            print("📱 [ScrcpyConnection] 设备: \(deviceName), 编码: \(codecStr), 尺寸: \(width)x\(height)")
+            onDeviceName?(deviceName, codecStr, width, height)
         }
 
         // 2. Framed video packets: 12B Header (8B PTS/flags + 4B Length) + Payload
@@ -126,6 +140,66 @@ public final class ScrcpyConnection: @unchecked Sendable {
             let payload = videoBuffer.subdata(in: 12..<(12 + packetLen))
             videoBuffer.removeSubrange(0..<(12 + packetLen))
             onVideoData?(payload)
+        }
+    }
+
+    private func readAudioStream(_ connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, error in
+            guard let self = self else { return }
+
+            if let data = content, !data.isEmpty {
+                self.audioBuffer.append(data)
+                self.parseAudioBuffer()
+            }
+
+            if isComplete || error != nil {
+                print("[Audio Socket] 连接关闭: \(String(describing: error))")
+            } else {
+                self.readAudioStream(connection)
+            }
+        }
+    }
+
+    private func parseAudioBuffer() {
+        // 1. Initial 4-byte header: Codec ID (raw / aac / opus / 0x00000000)
+        if !isAudioHeaderReceived {
+            guard audioBuffer.count >= 4 else { return }
+            let codecRaw = audioBuffer.subdata(in: 0..<4)
+            audioBuffer.removeSubrange(0..<4)
+            isAudioHeaderReceived = true
+
+            let codecStr = String(data: codecRaw, encoding: .ascii)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
+            print("🎵 [ScrcpyConnection] 接收到音频流 Codec 标识: '\(codecStr)'")
+
+            if codecStr.allSatisfy({ $0 == "\0" }) {
+                print("⚠️ [ScrcpyConnection] 设备端显式禁用了音频流 (系统低于 Android 11 或捕获失败)")
+                return
+            }
+        }
+
+        // 2. Framed audio packets: 12B Header (8B PTS/flags + 4B Length) + Payload
+        while audioBuffer.count >= 12 {
+            let ptsFlags = audioBuffer.subdata(in: 0..<8).withUnsafeBytes { $0.load(as: UInt64.self).bigEndian }
+            let packetLen = Int(audioBuffer.subdata(in: 8..<12).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
+
+            // Check config packet flag (bit 1 of 8-byte header: 1 << 62)
+            let isConfig = (ptsFlags & (UInt64(1) << 62)) != 0
+            if isConfig {
+                if audioBuffer.count >= 12 + packetLen {
+                    audioBuffer.removeSubrange(0..<(12 + packetLen))
+                    continue
+                } else {
+                    break
+                }
+            }
+
+            guard audioBuffer.count >= 12 + packetLen else {
+                break
+            }
+
+            let payload = audioBuffer.subdata(in: 12..<(12 + packetLen))
+            audioBuffer.removeSubrange(0..<(12 + packetLen))
+            onAudioData?(payload)
         }
     }
 
@@ -177,12 +251,16 @@ public final class ScrcpyConnection: @unchecked Sendable {
             self?.listener = nil
             self?.videoConnection?.cancel()
             self?.videoConnection = nil
+            self?.audioConnection?.cancel()
+            self?.audioConnection = nil
             self?.controlConnection?.cancel()
             self?.controlConnection = nil
             self?.incomingConnections.removeAll()
             self?.videoBuffer.removeAll()
+            self?.audioBuffer.removeAll()
             self?.controlBuffer.removeAll()
             self?.isHeaderReceived = false
+            self?.isAudioHeaderReceived = false
         }
     }
 }

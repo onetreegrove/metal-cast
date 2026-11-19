@@ -169,6 +169,16 @@ public struct DashboardView: View {
                         }
                         .pickerStyle(.segmented)
                     }
+
+                    HStack {
+                        Text("硬件视频编码")
+                            .frame(width: 140, alignment: .leading)
+                        Picker("", selection: $session.selectedCodec) {
+                            Text("H.264 (兼容性高)").tag("h264")
+                            Text("H.265 / HEVC (省50%带宽)").tag("h265")
+                        }
+                        .pickerStyle(.segmented)
+                    }
                 }
                 .padding(16)
                 .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
@@ -176,11 +186,22 @@ public struct DashboardView: View {
 
                 // Native macOS Features
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("便捷功能")
+                    Text("核心体验与原生功能")
                         .font(.headline)
+
+                    Toggle("低延迟音频转发（手机声音通过 Mac 扬声器/耳机输出）", isOn: $session.isAudioEnabled)
+                        .toggleStyle(.switch)
 
                     Toggle("投屏启动后自动熄灭手机屏幕（省电降温，投屏持续）", isOn: $session.screenOffOnStart)
                         .toggleStyle(.switch)
+
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Text("macOS 原生中文输入法与全键盘直通（支持拼音输入与全按键透传）")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
 
                     HStack(spacing: 6) {
                         Image(systemName: "checkmark.circle.fill")
