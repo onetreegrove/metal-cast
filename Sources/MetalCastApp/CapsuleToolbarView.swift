@@ -9,6 +9,7 @@ public protocol DockToolbarDelegate: AnyObject {
     func toolbarDidClickBack()
     func toolbarDidClickHome()
     func toolbarDidClickRecents()
+    func toolbarDidToggleGameKeyMap()
     func toolbarDidToggleScreenPower(_ isOff: Bool)
     func toolbarDidToggleAudioMute(_ isMuted: Bool)
     func toolbarDidClickScreenshot()
@@ -26,10 +27,17 @@ public final class DockToolbarView: NSVisualEffectView {
 
     private var isScreenOff = false
     private var isAudioMuted = false
+    private var isGameModeActive = false
     private var moonButton: NSButton?
     private var audioMuteButton: NSButton?
+    private var gameButton: NSButton?
     private var stackView: NSStackView!
     private var borderLine: NSBox!
+
+    public func setGameModeActive(_ isActive: Bool) {
+        self.isGameModeActive = isActive
+        self.gameButton?.contentTintColor = isActive ? .systemGreen : .labelColor
+    }
 
     public init(position: DockToolbarPosition = .right) {
         self.position = position
@@ -142,6 +150,12 @@ public final class DockToolbarView: NSVisualEffectView {
         screenBtn.contentTintColor = isScreenOff ? .systemOrange : .labelColor
         self.moonButton = screenBtn
 
+        let gameBtn = createButton(systemName: "gamecontroller.fill", fallbackText: "🎮", tooltip: "手游键鼠映射模式 (按 ~ 锁定/释放视角)") { [weak self] in
+            self?.delegate?.toolbarDidToggleGameKeyMap()
+        }
+        gameBtn.contentTintColor = isGameModeActive ? .systemGreen : .labelColor
+        self.gameButton = gameBtn
+
         let snapBtn = createButton(systemName: "camera.fill", fallbackText: "📸", tooltip: "保存高清截图至桌面并写入剪贴板") { [weak self] in
             self?.delegate?.toolbarDidClickScreenshot()
         }
@@ -187,7 +201,7 @@ public final class DockToolbarView: NSVisualEffectView {
         let items: [NSView] = [
             backBtn, homeBtn, recentsBtn,
             sep1,
-            screenBtn, snapBtn, volUpBtn, volDownBtn, muteBtn, powerBtn,
+            gameBtn, screenBtn, snapBtn, volUpBtn, volDownBtn, muteBtn, powerBtn,
             sep2,
             fullBtn, posBtn, hideBtn
         ]

@@ -3,7 +3,7 @@ import MetalCastCore
 
 public final class InputController: @unchecked Sendable {
     public var deviceSize: CGSize = CGSize(width: 720, height: 1600)
-    private weak var connection: ScrcpyConnection?
+    public private(set) weak var connection: ScrcpyConnection?
 
     public init(connection: ScrcpyConnection? = nil) {
         self.connection = connection
@@ -11,6 +11,10 @@ public final class InputController: @unchecked Sendable {
 
     public func setConnection(_ connection: ScrcpyConnection) {
         self.connection = connection
+    }
+
+    public func sendControlMessage(_ message: ControlMessage) {
+        connection?.sendControlMessage(message)
     }
 
     /// Converts view point (top-left origin if flipped) to Android coordinates

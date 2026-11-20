@@ -5,24 +5,75 @@ import MetalCastMedia
 
 public final class MirrorMTKView: MTKView, NSTextInputClient {
     public let inputController = InputController()
+    public let gameInputController = GameInputController()
+    public let hudView = GameKeyMapHUDView()
+
     public var serial: String = ""
     private var markedTextStorage: String = ""
+    private var trackingArea: NSTrackingArea?
 
     public override var isFlipped: Bool { true }
     public override var acceptsFirstResponder: Bool { true }
 
     public override init(frame frameRect: CGRect, device: MTLDevice?) {
         super.init(frame: frameRect, device: device)
-        self.wantsLayer = true
-        self.clearColor = MTLClearColor(red: 0.05, green: 0.05, blue: 0.07, alpha: 1.0)
-        setupDragAndDrop()
+        commonInit()
     }
 
     public required init(coder: NSCoder) {
         super.init(coder: coder)
+        commonInit()
+    }
+
+    private func commonInit() {
         self.wantsLayer = true
         self.clearColor = MTLClearColor(red: 0.05, green: 0.05, blue: 0.07, alpha: 1.0)
         setupDragAndDrop()
+
+        gameInputController.inputController = inputController
+
+        // Setup Floating Keymap HUD Overlay
+        hudView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(hudView)
+
+        NSLayoutConstraint.activate([
+            hudView.topAnchor.constraint(equalTo: topAnchor, constant: 14),
+            hudView.centerXAnchor.constraint(equalTo: centerXAnchor)
+        ])
+
+        gameInputController.onHUDMessage = { [weak self] message in
+            guard let self = self else { return }
+            let isActive = self.gameInputController.isGameModeActive
+            let isTempReleased = self.gameInputController.isCursorTemporarilyReleased
+            let autoHide: TimeInterval? = isActive ? (isTempReleased ? nil : 4.0) : 2.5
+            self.hudView.show(
+                message: message,
+                isActive: isActive,
+                isTemporaryReleased: isTempReleased,
+                autoHideDelay: autoHide
+            )
+        }
+    }
+
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.acceptsMouseMovedEvents = true
+    }
+
+    public override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingArea {
+            removeTrackingArea(existing)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseMoved, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        self.trackingArea = area
+        window?.acceptsMouseMovedEvents = true
     }
 
     private func setupDragAndDrop() {
@@ -33,26 +84,82 @@ public final class MirrorMTKView: MTKView, NSTextInputClient {
 
     public override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        if gameInputController.handleMouseDown(button: 0) {
+            return
+        }
         let location = convert(event.locationInWindow, from: nil)
         inputController.handleMouseDown(at: location, in: bounds.size)
     }
 
-    public override func mouseDragged(with event: NSEvent) {
-        let location = convert(event.locationInWindow, from: nil)
-        inputController.handleMouseDragged(to: location, in: bounds.size)
-    }
-
     public override func mouseUp(with event: NSEvent) {
+        if gameInputController.handleMouseUp(button: 0) {
+            return
+        }
         let location = convert(event.locationInWindow, from: nil)
         inputController.handleMouseUp(at: location, in: bounds.size)
     }
 
     public override func rightMouseDown(with event: NSEvent) {
-        // Right click defaults to Android BACK button
+        window?.makeFirstResponder(self)
+        if gameInputController.handleMouseDown(button: 1) {
+            return
+        }
+        // Normal mode: Right click defaults to Android BACK button
         inputController.sendBack()
     }
 
+    public override func rightMouseUp(with event: NSEvent) {
+        if gameInputController.handleMouseUp(button: 1) {
+            return
+        }
+    }
+
+    public override func otherMouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        if gameInputController.handleMouseDown(button: event.buttonNumber) {
+            return
+        }
+    }
+
+    public override func otherMouseUp(with event: NSEvent) {
+        if gameInputController.handleMouseUp(button: event.buttonNumber) {
+            return
+        }
+    }
+
+    public override func mouseMoved(with event: NSEvent) {
+        if gameInputController.handleMouseMove(deltaX: event.deltaX, deltaY: event.deltaY) {
+            return
+        }
+    }
+
+    public override func mouseDragged(with event: NSEvent) {
+        if gameInputController.isGameModeActive && !gameInputController.isCursorTemporarilyReleased {
+            _ = gameInputController.handleMouseMove(deltaX: event.deltaX, deltaY: event.deltaY)
+            return
+        }
+        let location = convert(event.locationInWindow, from: nil)
+        inputController.handleMouseDragged(to: location, in: bounds.size)
+    }
+
+    public override func rightMouseDragged(with event: NSEvent) {
+        if gameInputController.isGameModeActive && !gameInputController.isCursorTemporarilyReleased {
+            _ = gameInputController.handleMouseMove(deltaX: event.deltaX, deltaY: event.deltaY)
+            return
+        }
+    }
+
+    public override func otherMouseDragged(with event: NSEvent) {
+        if gameInputController.isGameModeActive && !gameInputController.isCursorTemporarilyReleased {
+            _ = gameInputController.handleMouseMove(deltaX: event.deltaX, deltaY: event.deltaY)
+            return
+        }
+    }
+
     public override func scrollWheel(with event: NSEvent) {
+        if gameInputController.isGameModeActive && !gameInputController.isCursorTemporarilyReleased {
+            return
+        }
         let location = convert(event.locationInWindow, from: nil)
         inputController.handleScroll(at: location, in: bounds.size, deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY)
     }
@@ -66,13 +173,18 @@ public final class MirrorMTKView: MTKView, NSTextInputClient {
             return
         }
 
-        // 2. If IME is composing, let Cocoa IME handle all keys (including Space, Enter, Backspace)
+        // 2. Intercept keys in Game Mode (WASD, hotkeys, switchKey ~)
+        if gameInputController.handleKeyDown(with: event) {
+            return
+        }
+
+        // 3. If IME is composing, let Cocoa IME handle all keys (including Space, Enter, Backspace)
         if hasMarkedText() {
             interpretKeyEvents([event])
             return
         }
 
-        // 3. Hardware / navigation keys when NOT composing in IME
+        // 4. Hardware / navigation keys when NOT composing in IME
         switch event.keyCode {
         case 36: // Enter / Return
             inputController.sendKeycode(66) // AKEYCODE_ENTER
@@ -91,8 +203,46 @@ public final class MirrorMTKView: MTKView, NSTextInputClient {
         case 126: // Up Arrow
             inputController.sendKeycode(19) // AKEYCODE_DPAD_UP
         default:
-            // 4. Forward to Cocoa Text Input Manager (handles letters, digits, punctuation, and IME activation)
+            // 5. Forward to Cocoa Text Input Manager (handles letters, digits, punctuation, and IME activation)
             interpretKeyEvents([event])
+        }
+    }
+
+    public override func keyUp(with event: NSEvent) {
+        if gameInputController.handleKeyUp(with: event) {
+            return
+        }
+        super.keyUp(with: event)
+    }
+
+    public override func flagsChanged(with event: NSEvent) {
+        super.flagsChanged(with: event)
+        let flags = event.modifierFlags
+
+        switch event.keyCode {
+        case 58, 61: // Option / Alt (e.g. SmallEyes free look)
+            let isPressed = flags.contains(.option)
+            if isPressed {
+                _ = gameInputController.handleKeyDown(with: event)
+            } else {
+                _ = gameInputController.handleKeyUp(with: event)
+            }
+        case 56, 60: // Shift
+            let isPressed = flags.contains(.shift)
+            if isPressed {
+                _ = gameInputController.handleKeyDown(with: event)
+            } else {
+                _ = gameInputController.handleKeyUp(with: event)
+            }
+        case 59, 62: // Control
+            let isPressed = flags.contains(.control)
+            if isPressed {
+                _ = gameInputController.handleKeyDown(with: event)
+            } else {
+                _ = gameInputController.handleKeyUp(with: event)
+            }
+        default:
+            break
         }
     }
 

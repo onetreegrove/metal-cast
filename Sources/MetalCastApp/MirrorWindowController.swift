@@ -10,7 +10,7 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
     private var initialHeight: CGFloat
 
     private var containerView: NSView!
-    private var mtkView: MirrorMTKView!
+    public private(set) var mtkView: MirrorMTKView!
     private var renderer: MetalRenderer?
     private var toolbarView: DockToolbarView!
 
@@ -92,6 +92,12 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
         toolbarView.delegate = self
         toolbarView.translatesAutoresizingMaskIntoConstraints = false
         containerView.addSubview(toolbarView)
+
+        // 3. Configure Active Game KeyMap Profile
+        if let activeProf = KeyMapManager.shared.activeProfile, let preset = KeyMapManager.shared.activePreset {
+            mtkView.gameInputController.setProfile(activeProf, name: preset.displayName)
+            print("🎮 [MirrorWindow] 已挂载按键映射预设: \(preset.displayName)")
+        }
 
         applyLayoutConstraints()
     }
@@ -209,6 +215,11 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
         mtkView.inputController.setConnection(connection)
     }
 
+    public func setKeyMapProfile(_ profile: KeyMapProfile?, name: String) {
+        mtkView.gameInputController.setProfile(profile, name: name)
+        toolbarView.setGameModeActive(mtkView.gameInputController.isGameModeActive)
+    }
+
     public func updateResolution(width: Int, height: Int) {
         self.initialWidth = CGFloat(width)
         self.initialHeight = CGFloat(height)
@@ -262,10 +273,16 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
     }
 
     public func windowWillClose(_ notification: Notification) {
+        mtkView.gameInputController.deactivateGameMode()
         onClose?()
     }
 
     // MARK: - DockToolbarDelegate
+
+    public func toolbarDidToggleGameKeyMap() {
+        mtkView.gameInputController.toggleGameMode()
+        toolbarView.setGameModeActive(mtkView.gameInputController.isGameModeActive)
+    }
 
     public func toolbarDidClickBack() {
         mtkView.inputController.sendBack()

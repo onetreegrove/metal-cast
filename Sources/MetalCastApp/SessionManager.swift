@@ -283,6 +283,14 @@ public final class SessionManager: ObservableObject {
         }
     }
 
+    public func updateActiveKeyMapProfile() {
+        if let winController = mirrorWindowController {
+            let activeProf = KeyMapManager.shared.activeProfile
+            let name = KeyMapManager.shared.activePreset?.displayName ?? ""
+            winController.setKeyMapProfile(activeProf, name: name)
+        }
+    }
+
     public func stopMirroring() {
         guard isRunning else { return }
         print("🛑 [Session] 正在停止投屏会话...")

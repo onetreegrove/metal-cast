@@ -73,9 +73,10 @@ else
     fi
 fi
 
-# 2. 复制内置通用 adb 与 scrcpy-server
+# 2. 复制内置通用 adb, scrcpy-server 与预设键鼠映射配置
 cp Resources/adb "$APP_DIR/Contents/Resources/"
 cp Resources/scrcpy-server "$APP_DIR/Contents/Resources/"
+cp -R Resources/keymap "$APP_DIR/Contents/Resources/"
 chmod +x "$APP_DIR/Contents/Resources/adb"
 chmod +x "$APP_DIR/Contents/MacOS/MetalCast"
 

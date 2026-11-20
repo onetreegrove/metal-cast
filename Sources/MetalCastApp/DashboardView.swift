@@ -3,6 +3,7 @@ import MetalCastCore
 
 public struct DashboardView: View {
     @ObservedObject var session = SessionManager.shared
+    @ObservedObject var keyMap = KeyMapManager.shared
 
     @State private var showingWifiDialog = false
     @State private var wifiIpInput = "192.168.1."
@@ -303,6 +304,55 @@ public struct DashboardView: View {
                 .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
                 .cornerRadius(10)
 
+                // Gaming KeyMap Section
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Image(systemName: "gamecontroller.fill")
+                            .foregroundColor(.accentColor)
+                        Text("手游键鼠映射系统")
+                            .font(.headline)
+                        Spacer()
+                        Button(action: {
+                            openCustomKeyMapDirectory()
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "folder")
+                                Text("自定义配置目录")
+                            }
+                            .font(.caption)
+                        }
+                        .buttonStyle(.link)
+                        .help("打开 ~/Library/Application Support/MetalCast/keymap 目录添加或编辑 JSON 配置文件")
+                    }
+
+                    HStack {
+                        Text("游戏按键预设")
+                            .frame(width: 140, alignment: .leading)
+                        Picker("", selection: $keyMap.selectedPresetId) {
+                            Text("关闭 (普通桌面鼠标模式)").tag("none")
+                            Divider()
+                            ForEach(keyMap.availablePresets) { preset in
+                                Text(preset.displayName).tag(preset.id)
+                            }
+                        }
+                        .onChange(of: keyMap.selectedPresetId) { _ in
+                            session.updateActiveKeyMapProfile()
+                        }
+                    }
+
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "info.circle")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Text("投屏中按 ~ 键随时锁定/释放视角。锁定后支持无边界 3D 视角移动、WASD 摇杆走位、鼠标左右键点击开火/开镜，M 地图与 Tab 背包自动释放鼠标。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(16)
+                .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
+                .cornerRadius(10)
+
                 // Native macOS Features
                 VStack(alignment: .leading, spacing: 12) {
                     Text("核心体验与原生功能")
@@ -364,7 +414,7 @@ public struct DashboardView: View {
             .padding(20)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 740, height: 560)
+        .frame(minWidth: 780, minHeight: 680)
         .onAppear {
             Task {
                 await session.refreshDevices()
@@ -443,6 +493,16 @@ public struct DashboardView: View {
                 }
             }
             .padding(24)
+        }
+    }
+
+    private func openCustomKeyMapDirectory() {
+        if let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            let dir = appSupport.appendingPathComponent("MetalCast/keymap")
+            if !FileManager.default.fileExists(atPath: dir.path) {
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            }
+            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: dir.path)
         }
     }
 }
