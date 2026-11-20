@@ -135,8 +135,9 @@ public final class MirrorMTKView: MTKView, NSTextInputClient {
 
     public override func mouseDragged(with event: NSEvent) {
         if gameInputController.isGameModeActive && !gameInputController.isCursorTemporarilyReleased {
-            _ = gameInputController.handleMouseMove(deltaX: event.deltaX, deltaY: event.deltaY)
-            return
+            if gameInputController.handleMouseMove(deltaX: event.deltaX, deltaY: event.deltaY) {
+                return
+            }
         }
         let location = convert(event.locationInWindow, from: nil)
         inputController.handleMouseDragged(to: location, in: bounds.size)
@@ -144,15 +145,17 @@ public final class MirrorMTKView: MTKView, NSTextInputClient {
 
     public override func rightMouseDragged(with event: NSEvent) {
         if gameInputController.isGameModeActive && !gameInputController.isCursorTemporarilyReleased {
-            _ = gameInputController.handleMouseMove(deltaX: event.deltaX, deltaY: event.deltaY)
-            return
+            if gameInputController.handleMouseMove(deltaX: event.deltaX, deltaY: event.deltaY) {
+                return
+            }
         }
     }
 
     public override func otherMouseDragged(with event: NSEvent) {
         if gameInputController.isGameModeActive && !gameInputController.isCursorTemporarilyReleased {
-            _ = gameInputController.handleMouseMove(deltaX: event.deltaX, deltaY: event.deltaY)
-            return
+            if gameInputController.handleMouseMove(deltaX: event.deltaX, deltaY: event.deltaY) {
+                return
+            }
         }
     }
 

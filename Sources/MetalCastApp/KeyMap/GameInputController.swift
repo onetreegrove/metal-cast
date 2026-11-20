@@ -76,7 +76,7 @@ public final class GameInputController: ObservableObject {
 
         // 1. Switch Key
         if let swStr = profile.switchKey, let tr = KeyMappingConverter.parseTrigger(from: swStr) {
-            self.switchTrigger = tr
+            self.switchTrigger = normalizeTrigger(tr)
         } else {
             self.switchTrigger = .key(50) // Default `~`
         }
@@ -85,7 +85,7 @@ public final class GameInputController: ObservableObject {
         if let mm = profile.mouseMoveMap {
             self.mouseMoveConfig = mm
             if let se = mm.smallEyes, let seTr = KeyMappingConverter.parseTrigger(from: se.key) {
-                self.smallEyesTrigger = seTr
+                self.smallEyesTrigger = normalizeTrigger(seTr)
             }
         }
 
@@ -94,26 +94,44 @@ public final class GameInputController: ObservableObject {
             switch node.type {
             case .steerWheel:
                 self.steerWheelNode = node
-                if let k = node.upKey { self.steerUpTrigger = KeyMappingConverter.parseTrigger(from: k) }
-                if let k = node.downKey { self.steerDownTrigger = KeyMappingConverter.parseTrigger(from: k) }
-                if let k = node.leftKey { self.steerLeftTrigger = KeyMappingConverter.parseTrigger(from: k) }
-                if let k = node.rightKey { self.steerRightTrigger = KeyMappingConverter.parseTrigger(from: k) }
+                if let k = node.upKey, let tr = KeyMappingConverter.parseTrigger(from: k) {
+                    self.steerUpTrigger = normalizeTrigger(tr)
+                }
+                if let k = node.downKey, let tr = KeyMappingConverter.parseTrigger(from: k) {
+                    self.steerDownTrigger = normalizeTrigger(tr)
+                }
+                if let k = node.leftKey, let tr = KeyMappingConverter.parseTrigger(from: k) {
+                    self.steerLeftTrigger = normalizeTrigger(tr)
+                }
+                if let k = node.rightKey, let tr = KeyMappingConverter.parseTrigger(from: k) {
+                    self.steerRightTrigger = normalizeTrigger(tr)
+                }
 
             case .click, .clickTwice, .androidKey:
                 if let k = node.key, let tr = KeyMappingConverter.parseTrigger(from: k) {
-                    clickNodesMap[tr] = node
+                    clickNodesMap[normalizeTrigger(tr)] = node
                 }
 
             case .clickMulti:
                 if let k = node.key, let tr = KeyMappingConverter.parseTrigger(from: k) {
-                    multiClickNodesMap[tr] = node
+                    multiClickNodesMap[normalizeTrigger(tr)] = node
                 }
 
             case .drag:
                 if let k = node.key, let tr = KeyMappingConverter.parseTrigger(from: k) {
-                    dragNodesMap[tr] = node
+                    dragNodesMap[normalizeTrigger(tr)] = node
                 }
             }
+        }
+    }
+
+    private func normalizeTrigger(_ trigger: InputTrigger) -> InputTrigger {
+        switch trigger {
+        case .key(60): return .key(56) // Right Shift -> Left Shift
+        case .key(61): return .key(58) // Right Option -> Left Option
+        case .key(62): return .key(59) // Right Control -> Left Control
+        case .key(54): return .key(55) // Right Command -> Left Command
+        default: return trigger
         }
     }
 
@@ -172,22 +190,32 @@ public final class GameInputController: ObservableObject {
     /// Returns true if the key event was intercepted and consumed by GameInputController
     public func handleKeyDown(with event: NSEvent) -> Bool {
         guard profile != nil else { return false }
-        let trigger = InputTrigger.key(event.keyCode)
+        let trigger = normalizeTrigger(InputTrigger.key(event.keyCode))
 
         // 1. Switch Key toggle
         if trigger == switchTrigger {
-            toggleGameMode()
+            if event.isARepeat { return true }
+            if isCursorTemporarilyReleased {
+                // If cursor was temporarily released for map/inventory, pressing switchKey re-locks into 3D view
+                toggleTemporaryPointerRelease()
+            } else {
+                toggleGameMode()
+            }
             return true
+        }
+
+        // Ignore auto-repeat key downs for triggers to prevent repeated toggles / clicks
+        if event.isARepeat {
+            return isGameModeActive
         }
 
         // If game mode is not active, let normal input pass through
         guard isGameModeActive else { return false }
 
-        // If pointer is temporarily released (e.g. Map / Inventory open), check if pressed key toggles it back
+        // If pointer is temporarily released (e.g. Map / Inventory open), allow switchMap key to send touch down without toggling
         if isCursorTemporarilyReleased {
             if let node = clickNodesMap[trigger], node.switchMap == true {
                 processKeyClick(trigger: trigger, node: node, isDown: true)
-                toggleTemporaryPointerRelease()
                 return true
             }
             return false // Pass through so user can interact
@@ -230,7 +258,7 @@ public final class GameInputController: ObservableObject {
     /// Returns true if the key up event was intercepted and consumed
     public func handleKeyUp(with event: NSEvent) -> Bool {
         guard profile != nil, isGameModeActive else { return false }
-        let trigger = InputTrigger.key(event.keyCode)
+        let trigger = normalizeTrigger(InputTrigger.key(event.keyCode))
 
         if trigger == switchTrigger {
             return true
@@ -287,8 +315,14 @@ public final class GameInputController: ObservableObject {
 
     /// Mouse up handler
     public func handleMouseUp(button: Int) -> Bool {
-        guard profile != nil, isGameModeActive, !isCursorTemporarilyReleased else { return false }
+        guard profile != nil else { return false }
         let trigger = InputTrigger.mouseButton(button)
+
+        if trigger == switchTrigger {
+            return true
+        }
+
+        guard isGameModeActive, !isCursorTemporarilyReleased else { return false }
 
         if let node = clickNodesMap[trigger] {
             processKeyClick(trigger: trigger, node: node, isDown: false)
@@ -317,8 +351,10 @@ public final class GameInputController: ObservableObject {
         let speedY = mm.effectiveSpeedRatioY
 
         // Convert deltas into normalized [0, 1] screen offset
+        // In macOS AppKit, deltaY > 0 when mouse moves UP towards top of screen.
+        // On phone touchscreen, Y = 0 is top, so moving mouse UP should decrease Y.
         let dx = Double(deltaX) / (speedX * 600.0)
-        let dy = Double(deltaY) / (speedY * 600.0)
+        let dy = -Double(deltaY) / (speedY * 600.0)
 
         if !isMouseLookTouching {
             currentMouseLookPos = CGPoint(x: baseStartPos.x, y: baseStartPos.y)
@@ -330,11 +366,12 @@ public final class GameInputController: ObservableObject {
         currentMouseLookPos.y += dy
 
         // Boundary Reset (Infinite Pan)
+        // Cleanly lift touch on edge so the very next mouse movement seamlessly re-enters at startPos
         if currentMouseLookPos.x < 0.08 || currentMouseLookPos.x > 0.92 ||
            currentMouseLookPos.y < 0.08 || currentMouseLookPos.y > 0.92 {
             injectTouch(action: .up, pointerId: targetPointerId, normPos: currentMouseLookPos)
-            currentMouseLookPos = CGPoint(x: baseStartPos.x, y: baseStartPos.y)
-            injectTouch(action: .down, pointerId: targetPointerId, normPos: currentMouseLookPos)
+            isMouseLookTouching = false
+            return true
         } else {
             injectTouch(action: .move, pointerId: targetPointerId, normPos: currentMouseLookPos)
         }
@@ -425,8 +462,9 @@ public final class GameInputController: ObservableObject {
             let pid = allocatePointerId(for: trigger)
             injectTouch(action: .down, pointerId: pid, normPos: cgPos)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
-                self?.injectTouch(action: .up, pointerId: pid, normPos: cgPos)
-                self?.freePointerId(for: trigger)
+                guard let self = self, self.isGameModeActive else { return }
+                self.injectTouch(action: .up, pointerId: pid, normPos: cgPos)
+                self.freePointerId(for: trigger)
             }
             return
         }
@@ -457,10 +495,12 @@ public final class GameInputController: ObservableObject {
             let tempPid: UInt64 = 40 + UInt64(idx % 10)
 
             DispatchQueue.main.asyncAfter(deadline: .now() + accumulatedDelay) { [weak self] in
-                self?.injectTouch(action: .down, pointerId: tempPid, normPos: pos)
+                guard let self = self, self.isGameModeActive else { return }
+                self.injectTouch(action: .down, pointerId: tempPid, normPos: pos)
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + accumulatedDelay + 0.03) { [weak self] in
-                self?.injectTouch(action: .up, pointerId: tempPid, normPos: pos)
+                guard let self = self, self.isGameModeActive else { return }
+                self.injectTouch(action: .up, pointerId: tempPid, normPos: pos)
             }
         }
     }
@@ -476,7 +516,7 @@ public final class GameInputController: ObservableObject {
         let stepInterval = max(0.01, 0.15 / Double(steps))
 
         DispatchQueue.main.asyncAfter(deadline: .now() + initialDelay) { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, self.isGameModeActive else { return }
             self.injectTouch(action: .down, pointerId: dragPid, normPos: startPos)
 
             for i in 1...steps {
@@ -486,12 +526,14 @@ public final class GameInputController: ObservableObject {
                     y: startPos.y + (endPos.y - startPos.y) * t
                 )
                 DispatchQueue.main.asyncAfter(deadline: .now() + stepInterval * Double(i)) { [weak self] in
-                    self?.injectTouch(action: .move, pointerId: dragPid, normPos: intermediate)
+                    guard let self = self, self.isGameModeActive else { return }
+                    self.injectTouch(action: .move, pointerId: dragPid, normPos: intermediate)
                 }
             }
 
             DispatchQueue.main.asyncAfter(deadline: .now() + stepInterval * Double(steps + 1)) { [weak self] in
-                self?.injectTouch(action: .up, pointerId: dragPid, normPos: endPos)
+                guard let self = self, self.isGameModeActive else { return }
+                self.injectTouch(action: .up, pointerId: dragPid, normPos: endPos)
             }
         }
     }

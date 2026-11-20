@@ -418,6 +418,7 @@ public struct DashboardView: View {
         .onAppear {
             Task {
                 await session.refreshDevices()
+                keyMap.refreshPresets()
             }
         }
         // Manual Wi-Fi Connect Sheet
@@ -503,6 +504,7 @@ public struct DashboardView: View {
                 try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             }
             NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: dir.path)
+            keyMap.refreshPresets()
         }
     }
 }

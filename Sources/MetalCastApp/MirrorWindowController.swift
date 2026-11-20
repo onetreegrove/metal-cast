@@ -18,6 +18,7 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
     private var isToolbarHidden = false
     private var activeConstraints: [NSLayoutConstraint] = []
     private var keyMonitor: Any?
+    private var appResignObserver: Any?
 
     private let rightToolbarWidth: CGFloat = 42
     private let bottomToolbarHeight: CGFloat = 38
@@ -62,6 +63,9 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
     deinit {
         if let monitor = keyMonitor {
             NSEvent.removeMonitor(monitor)
+        }
+        if let obs = appResignObserver {
+            NotificationCenter.default.removeObserver(obs)
         }
     }
 
@@ -190,6 +194,18 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
 
             return event
         }
+
+        appResignObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self, self.mtkView.gameInputController.isGameModeActive else { return }
+                self.mtkView.gameInputController.deactivateGameMode()
+                self.toolbarView.setGameModeActive(false)
+            }
+        }
     }
 
     public func toggleToolbarVisibility() {
@@ -275,6 +291,20 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
     public func windowWillClose(_ notification: Notification) {
         mtkView.gameInputController.deactivateGameMode()
         onClose?()
+    }
+
+    public func windowDidResignKey(_ notification: Notification) {
+        if mtkView.gameInputController.isGameModeActive {
+            mtkView.gameInputController.deactivateGameMode()
+            toolbarView.setGameModeActive(false)
+        }
+    }
+
+    public func windowDidMiniaturize(_ notification: Notification) {
+        if mtkView.gameInputController.isGameModeActive {
+            mtkView.gameInputController.deactivateGameMode()
+            toolbarView.setGameModeActive(false)
+        }
     }
 
     // MARK: - DockToolbarDelegate

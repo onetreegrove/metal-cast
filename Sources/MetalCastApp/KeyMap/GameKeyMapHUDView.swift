@@ -21,6 +21,7 @@ public final class GameKeyMapHUDView: NSVisualEffectView {
         blendingMode = .withinWindow
         state = .active
         wantsLayer = true
+        layer?.zPosition = 1000 // Ensure always rendered on top of CAMetalLayer
         layer?.cornerRadius = 16
         layer?.masksToBounds = true
         layer?.borderWidth = 1
