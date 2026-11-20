@@ -87,24 +87,23 @@ public final class AudioPlayer: @unchecked Sendable {
     }
 
     public func enqueue(data: Data) {
-        guard let queue = audioQueue, !data.isEmpty else { return }
+        guard !data.isEmpty else { return }
 
         lock.lock()
-        if let buffer = bufferPool.popLast() {
-            lock.unlock()
-            fillAndEnqueue(buffer: buffer, with: data, queue: queue)
-            return
+        defer { lock.unlock() }
+
+        guard let queue = audioQueue else { return }
+
+        let buffer: AudioQueueBufferRef
+        if let pooled = bufferPool.popLast() {
+            buffer = pooled
+        } else {
+            var dynamicBuffer: AudioQueueBufferRef?
+            let allocStatus = AudioQueueAllocateBuffer(queue, max(bufferSize, UInt32(data.count)), &dynamicBuffer)
+            guard allocStatus == noErr, let buf = dynamicBuffer else { return }
+            buffer = buf
         }
-        lock.unlock()
 
-        // Allocate a new standard buffer if needed
-        var dynamicBuffer: AudioQueueBufferRef?
-        let allocStatus = AudioQueueAllocateBuffer(queue, max(bufferSize, UInt32(data.count)), &dynamicBuffer)
-        guard allocStatus == noErr, let buf = dynamicBuffer else { return }
-        fillAndEnqueue(buffer: buf, with: data, queue: queue)
-    }
-
-    private func fillAndEnqueue(buffer: AudioQueueBufferRef, with data: Data, queue: AudioQueueRef) {
         let copyLength = min(Int(buffer.pointee.mAudioDataBytesCapacity), data.count)
         data.withUnsafeBytes { rawPtr in
             guard let baseAddress = rawPtr.baseAddress else { return }
@@ -115,9 +114,7 @@ public final class AudioPlayer: @unchecked Sendable {
         let status = AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
         if status != noErr {
             print("⚠️ [AudioPlayer] AudioQueueEnqueueBuffer 失败: \(status)")
-            lock.lock()
             bufferPool.append(buffer)
-            lock.unlock()
             return
         }
 

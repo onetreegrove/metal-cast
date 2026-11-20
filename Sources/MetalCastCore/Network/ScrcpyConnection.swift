@@ -123,8 +123,11 @@ public final class ScrcpyConnection: @unchecked Sendable {
 
         // 2. Framed video packets: 12B Header (8B PTS/flags + 4B Length) + Payload
         while videoBuffer.count >= 12 {
-            let ptsFlags = videoBuffer.subdata(in: 0..<8).withUnsafeBytes { $0.load(as: UInt64.self).bigEndian }
-            let packetLen = Int(videoBuffer.subdata(in: 8..<12).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
+            let (ptsFlags, packetLen): (UInt64, Int) = videoBuffer.withUnsafeBytes { rawPtr in
+                let pts = rawPtr.loadUnaligned(fromByteOffset: 0, as: UInt64.self).bigEndian
+                let len = Int(rawPtr.loadUnaligned(fromByteOffset: 8, as: UInt32.self).bigEndian)
+                return (pts, len)
+            }
 
             // Session metadata packet (flag 1<<63): 12 bytes total, no extra payload
             if (ptsFlags & (UInt64(1) << 63)) != 0 {
@@ -180,8 +183,11 @@ public final class ScrcpyConnection: @unchecked Sendable {
 
         // 2. Framed audio packets: 12B Header (8B PTS/flags + 4B Length) + Payload
         while audioBuffer.count >= 12 {
-            let ptsFlags = audioBuffer.subdata(in: 0..<8).withUnsafeBytes { $0.load(as: UInt64.self).bigEndian }
-            let packetLen = Int(audioBuffer.subdata(in: 8..<12).withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
+            let (ptsFlags, packetLen): (UInt64, Int) = audioBuffer.withUnsafeBytes { rawPtr in
+                let pts = rawPtr.loadUnaligned(fromByteOffset: 0, as: UInt64.self).bigEndian
+                let len = Int(rawPtr.loadUnaligned(fromByteOffset: 8, as: UInt32.self).bigEndian)
+                return (pts, len)
+            }
 
             // Check config packet flag (bit 1 of 8-byte header: 1 << 62)
             let isConfig = (ptsFlags & (UInt64(1) << 62)) != 0

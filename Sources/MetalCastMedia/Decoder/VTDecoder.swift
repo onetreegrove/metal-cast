@@ -31,8 +31,8 @@ public final class VTDecoder: @unchecked Sendable {
 
         var outputCallback = VTDecompressionOutputCallbackRecord(
             decompressionOutputCallback: { (decompressionOutputRefCon, _, status, _, imageBuffer, _, _) in
-                guard status == noErr, let buffer = imageBuffer else { return }
-                let decoder = Unmanaged<VTDecoder>.fromOpaque(decompressionOutputRefCon!).takeUnretainedValue()
+                guard let refCon = decompressionOutputRefCon, status == noErr, let buffer = imageBuffer else { return }
+                let decoder = Unmanaged<VTDecoder>.fromOpaque(refCon).takeUnretainedValue()
                 decoder.onPixelBuffer?(buffer)
             },
             decompressionOutputRefCon: Unmanaged.passUnretained(self).toOpaque()

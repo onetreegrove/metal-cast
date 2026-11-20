@@ -197,8 +197,11 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
 
         commandBuffer.present(drawable)
         commandBuffer.commit()
-        CVMetalTextureCacheFlush(textureCache, 0)
     }
 
-    public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+    public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        if let cache = textureCache {
+            CVMetalTextureCacheFlush(cache, 0)
+        }
+    }
 }

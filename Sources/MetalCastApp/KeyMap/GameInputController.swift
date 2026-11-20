@@ -41,10 +41,13 @@ public final class GameInputController: ObservableObject {
     private var isSteerTouching = false
     private var currentSteerPos: CGPoint = .zero
 
-    // Mouse Look state
+    // Mouse Look state & pacing
     private var isMouseLookTouching = false
     private var currentMouseLookPos: CGPoint = .zero
     private var mouseLookIdleTimer: Timer?
+    private var lastMouseMoveTime: CFTimeInterval = 0
+    private var lastMouseMoveSendTime: CFTimeInterval = 0
+    private var lastSentMovePositions: [UInt64: (x: Int32, y: Int32)] = [:]
     private var isSmallEyesActive = false
 
     public init(inputController: InputController? = nil) {
@@ -196,7 +199,6 @@ public final class GameInputController: ObservableObject {
         if trigger == switchTrigger {
             if event.isARepeat { return true }
             if isCursorTemporarilyReleased {
-                // If cursor was temporarily released for map/inventory, pressing switchKey re-locks into 3D view
                 toggleTemporaryPointerRelease()
             } else {
                 toggleGameMode()
@@ -360,6 +362,7 @@ public final class GameInputController: ObservableObject {
             currentMouseLookPos = CGPoint(x: baseStartPos.x, y: baseStartPos.y)
             injectTouch(action: .down, pointerId: targetPointerId, normPos: currentMouseLookPos)
             isMouseLookTouching = true
+            lastMouseMoveSendTime = CACurrentMediaTime()
         }
 
         currentMouseLookPos.x += dx
@@ -372,19 +375,34 @@ public final class GameInputController: ObservableObject {
             injectTouch(action: .up, pointerId: targetPointerId, normPos: currentMouseLookPos)
             isMouseLookTouching = false
             return true
-        } else {
-            injectTouch(action: .move, pointerId: targetPointerId, normPos: currentMouseLookPos)
         }
 
-        resetMouseLookIdleTimer(pointerId: targetPointerId)
+        // Pacing: cap mouse look touch move rate to ~240Hz (interval 4ms) to protect Android socket
+        let now = CACurrentMediaTime()
+        if now - lastMouseMoveSendTime >= 0.004 {
+            injectTouch(action: .move, pointerId: targetPointerId, normPos: currentMouseLookPos)
+            lastMouseMoveSendTime = now
+        }
+
+        lastMouseMoveTime = now
+        if mouseLookIdleTimer == nil {
+            scheduleMouseLookIdleTimer()
+        }
         return true
     }
 
-    private func resetMouseLookIdleTimer(pointerId: UInt64) {
+    private func scheduleMouseLookIdleTimer() {
         mouseLookIdleTimer?.invalidate()
         mouseLookIdleTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.stopMouseLookTouch()
+                guard let self = self else { return }
+                let elapsed = CACurrentMediaTime() - self.lastMouseMoveTime
+                if elapsed >= 0.35 {
+                    self.stopMouseLookTouch()
+                    self.mouseLookIdleTimer = nil
+                } else {
+                    self.scheduleMouseLookIdleTimer()
+                }
             }
         }
     }
@@ -575,6 +593,7 @@ public final class GameInputController: ObservableObject {
             }
         }
         activePointerIds.removeAll()
+        lastSentMovePositions.removeAll()
     }
 
     private func injectTouch(action: ControlMessage.TouchAction, pointerId: UInt64, normPos: CGPoint) {
@@ -589,9 +608,21 @@ public final class GameInputController: ObservableObject {
         let androidX = Int32(round(clampedX * Double(devW)))
         let androidY = Int32(round(clampedY * Double(devH)))
 
-        let pt = ControlMessage.Point(x: androidX, y: androidY)
-        let res = ControlMessage.Size(width: UInt16(devW), height: UInt16(devH))
+        // Filter redundant move packets if integer device coordinates are unchanged
+        if action == .move {
+            if let last = lastSentMovePositions[pointerId], last.x == androidX && last.y == androidY {
+                return
+            }
+            lastSentMovePositions[pointerId] = (androidX, androidY)
+        } else {
+            lastSentMovePositions[pointerId] = (androidX, androidY)
+        }
 
-        ic.connection?.sendControlMessage(.injectTouch(action: action, pointerId: pointerId, position: pt, resolution: res))
+        let safeW = UInt16(clamping: max(0, Int(devW)))
+        let safeH = UInt16(clamping: max(0, Int(devH)))
+        let pt = ControlMessage.Point(x: androidX, y: androidY)
+        let res = ControlMessage.Size(width: safeW, height: safeH)
+
+        ic.sendControlMessage(.injectTouch(action: action, pointerId: pointerId, position: pt, resolution: res))
     }
 }

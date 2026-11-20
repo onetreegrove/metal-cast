@@ -29,16 +29,26 @@ public final class AnnexBParser: @unchecked Sendable {
 
         while true {
             guard let (startCodeLen, startIndex) = findStartCode(in: buffer, offset: 0) else {
+                // If buffer is large without any start code, discard garbage to avoid memory leak
+                if buffer.count > 4 * 1024 * 1024 {
+                    buffer.removeAll(keepingCapacity: true)
+                }
                 break
             }
 
+            // If there was junk data preceding the first start code, trim it
+            if startIndex > 0 {
+                buffer.removeSubrange(0..<startIndex)
+                continue
+            }
+
             // Find next start code to delineate the NAL unit
-            guard let (_, nextIndex) = findStartCode(in: buffer, offset: startIndex + startCodeLen) else {
+            guard let (_, nextIndex) = findStartCode(in: buffer, offset: startCodeLen) else {
                 // Incomplete NALU, wait for more data
                 break
             }
 
-            let nalData = buffer.subdata(in: (startIndex + startCodeLen)..<nextIndex)
+            let nalData = buffer.subdata(in: startCodeLen..<nextIndex)
             processNALU(nalData)
 
             buffer.removeSubrange(0..<nextIndex)
@@ -173,35 +183,38 @@ public final class AnnexBParser: @unchecked Sendable {
     }
 
     private func createSampleBuffer(from nalu: Data, formatDesc: CMVideoFormatDescription) {
-        // Build AVCC/HVCC: 4-byte big endian length prefix followed by NALU bytes
-        var lengthPrefix = UInt32(nalu.count).bigEndian
-        var avccData = Data(bytes: &lengthPrefix, count: 4)
-        avccData.append(nalu)
-
+        // Direct zero-copy allocation into CMBlockBuffer (4-byte length prefix + raw NALU payload)
+        let totalLength = 4 + nalu.count
         var blockBuffer: CMBlockBuffer?
-        let status = avccData.withUnsafeBytes { ptr in
-            CMBlockBufferCreateWithMemoryBlock(
-                allocator: kCFAllocatorDefault,
-                memoryBlock: nil,
-                blockLength: avccData.count,
-                blockAllocator: kCFAllocatorDefault,
-                customBlockSource: nil,
-                offsetToData: 0,
-                dataLength: avccData.count,
-                flags: 0,
-                blockBufferOut: &blockBuffer
-            )
-        }
+        let status = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: totalLength,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: totalLength,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
 
         guard status == kCMBlockBufferNoErr, let block = blockBuffer else { return }
 
-        avccData.withUnsafeBytes { ptr in
+        var lengthPrefix = UInt32(nalu.count).bigEndian
+        CMBlockBufferReplaceDataBytes(
+            with: &lengthPrefix,
+            blockBuffer: block,
+            offsetIntoDestination: 0,
+            dataLength: 4
+        )
+
+        nalu.withUnsafeBytes { ptr in
             if let base = ptr.baseAddress {
                 CMBlockBufferReplaceDataBytes(
                     with: base,
                     blockBuffer: block,
-                    offsetIntoDestination: 0,
-                    dataLength: avccData.count
+                    offsetIntoDestination: 4,
+                    dataLength: nalu.count
                 )
             }
         }
@@ -216,7 +229,7 @@ public final class AnnexBParser: @unchecked Sendable {
             decodeTimeStamp: .invalid
         )
 
-        var sampleSize = avccData.count
+        var sampleSize = totalLength
         CMSampleBufferCreate(
             allocator: kCFAllocatorDefault,
             dataBuffer: block,

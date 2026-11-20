@@ -62,27 +62,29 @@ public final class InputController: @unchecked Sendable {
     // POINTER_ID_GENERIC_FINGER = -2 in scrcpy
     private let genericFingerId: UInt64 = 0xFFFFFFFFFFFFFFFE
 
+    private var resolutionSize: ControlMessage.Size {
+        let safeW = UInt16(clamping: max(0, Int(deviceSize.width)))
+        let safeH = UInt16(clamping: max(0, Int(deviceSize.height)))
+        return ControlMessage.Size(width: safeW, height: safeH)
+    }
+
     public func handleMouseDown(at point: CGPoint, in viewSize: CGSize) {
         guard let androidPoint = mapPoint(point, in: viewSize, clamped: false) else { return }
-        let res = ControlMessage.Size(width: UInt16(deviceSize.width), height: UInt16(deviceSize.height))
-        connection?.sendControlMessage(.injectTouch(action: .down, pointerId: genericFingerId, position: androidPoint, resolution: res))
+        connection?.sendControlMessage(.injectTouch(action: .down, pointerId: genericFingerId, position: androidPoint, resolution: resolutionSize))
     }
 
     public func handleMouseDragged(to point: CGPoint, in viewSize: CGSize) {
         guard let androidPoint = mapPoint(point, in: viewSize, clamped: true) else { return }
-        let res = ControlMessage.Size(width: UInt16(deviceSize.width), height: UInt16(deviceSize.height))
-        connection?.sendControlMessage(.injectTouch(action: .move, pointerId: genericFingerId, position: androidPoint, resolution: res))
+        connection?.sendControlMessage(.injectTouch(action: .move, pointerId: genericFingerId, position: androidPoint, resolution: resolutionSize))
     }
 
     public func handleMouseUp(at point: CGPoint, in viewSize: CGSize) {
         let androidPoint = mapPoint(point, in: viewSize, clamped: true) ?? ControlMessage.Point(x: 0, y: 0)
-        let res = ControlMessage.Size(width: UInt16(deviceSize.width), height: UInt16(deviceSize.height))
-        connection?.sendControlMessage(.injectTouch(action: .up, pointerId: genericFingerId, position: androidPoint, resolution: res))
+        connection?.sendControlMessage(.injectTouch(action: .up, pointerId: genericFingerId, position: androidPoint, resolution: resolutionSize))
     }
 
     public func handleScroll(at point: CGPoint, in viewSize: CGSize, deltaX: CGFloat, deltaY: CGFloat) {
         guard let androidPoint = mapPoint(point, in: viewSize) else { return }
-        let res = ControlMessage.Size(width: UInt16(deviceSize.width), height: UInt16(deviceSize.height))
 
         // Normalize [-16, 16] to [-1.0, 1.0] and map to fixed point Int16 [-32768, 32767]
         let hNorm = max(-1.0, min(1.0, Double(-deltaX) / 16.0))
@@ -90,7 +92,7 @@ public final class InputController: @unchecked Sendable {
         let hScrollI16 = Int16(clamping: Int(round(hNorm * 32767.0)))
         let vScrollI16 = Int16(clamping: Int(round(vNorm * 32767.0)))
 
-        connection?.sendControlMessage(.injectScroll(position: androidPoint, resolution: res, hScroll: hScrollI16, vScroll: vScrollI16))
+        connection?.sendControlMessage(.injectScroll(position: androidPoint, resolution: resolutionSize, hScroll: hScrollI16, vScroll: vScrollI16))
     }
 
     public func sendBack() {
