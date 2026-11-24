@@ -26,8 +26,14 @@ public final class GameInputController: ObservableObject {
     private let steerWheelPointerId: UInt64 = 1
     private let mouseLookPointerId: UInt64 = 2
     private let smallEyesPointerId: UInt64 = 3
+    private let dragPointerId: UInt64 = 55
     private var activePointerIds: [InputTrigger: UInt64] = [:]
+    private var activeEphemeralPointerIds: Set<UInt64> = []
     private var nextDynamicPointerId: UInt64 = 10
+    private var isDragActive: Bool = false
+    private var lastDragEndPos: CGPoint = .zero
+    private var isPointerLocked: Bool = false
+    private var currentMouseLookPointerId: UInt64 = 2
 
     // Steer Wheel (WASD) state
     private var steerUpTrigger: InputTrigger?
@@ -168,6 +174,8 @@ public final class GameInputController: ObservableObject {
     }
 
     private func lockPointer(_ lock: Bool) {
+        guard isPointerLocked != lock else { return }
+        isPointerLocked = lock
         if lock {
             CGAssociateMouseAndMouseCursorPosition(0) // false: Freeze cursor position
             NSCursor.hide()
@@ -359,8 +367,9 @@ public final class GameInputController: ObservableObject {
         let dy = -Double(deltaY) / (speedY * 600.0)
 
         if !isMouseLookTouching {
+            currentMouseLookPointerId = targetPointerId
             currentMouseLookPos = CGPoint(x: baseStartPos.x, y: baseStartPos.y)
-            injectTouch(action: .down, pointerId: targetPointerId, normPos: currentMouseLookPos)
+            injectTouch(action: .down, pointerId: currentMouseLookPointerId, normPos: currentMouseLookPos)
             isMouseLookTouching = true
             lastMouseMoveSendTime = CACurrentMediaTime()
         }
@@ -372,7 +381,7 @@ public final class GameInputController: ObservableObject {
         // Cleanly lift touch on edge so the very next mouse movement seamlessly re-enters at startPos
         if currentMouseLookPos.x < 0.08 || currentMouseLookPos.x > 0.92 ||
            currentMouseLookPos.y < 0.08 || currentMouseLookPos.y > 0.92 {
-            injectTouch(action: .up, pointerId: targetPointerId, normPos: currentMouseLookPos)
+            injectTouch(action: .up, pointerId: currentMouseLookPointerId, normPos: currentMouseLookPos)
             isMouseLookTouching = false
             return true
         }
@@ -380,7 +389,7 @@ public final class GameInputController: ObservableObject {
         // Pacing: cap mouse look touch move rate to ~240Hz (interval 4ms) to protect Android socket
         let now = CACurrentMediaTime()
         if now - lastMouseMoveSendTime >= 0.004 {
-            injectTouch(action: .move, pointerId: targetPointerId, normPos: currentMouseLookPos)
+            injectTouch(action: .move, pointerId: currentMouseLookPointerId, normPos: currentMouseLookPos)
             lastMouseMoveSendTime = now
         }
 
@@ -411,8 +420,7 @@ public final class GameInputController: ObservableObject {
         mouseLookIdleTimer?.invalidate()
         mouseLookIdleTimer = nil
         if isMouseLookTouching {
-            let pointerId = isSmallEyesActive ? smallEyesPointerId : mouseLookPointerId
-            injectTouch(action: .up, pointerId: pointerId, normPos: currentMouseLookPos)
+            injectTouch(action: .up, pointerId: currentMouseLookPointerId, normPos: currentMouseLookPos)
             isMouseLookTouching = false
         }
     }
@@ -477,12 +485,20 @@ public final class GameInputController: ObservableObject {
 
         if node.type == .clickTwice {
             // Tap on press and tap again on release (e.g. peek/lean)
-            let pid = allocatePointerId(for: trigger)
-            injectTouch(action: .down, pointerId: pid, normPos: cgPos)
+            // Use ephemeral pointer IDs in range 35...39 so rapid presses/releases never collide
+            var ephemeralPid: UInt64 = 35
+            for id: UInt64 in 35...39 {
+                if !activeEphemeralPointerIds.contains(id) {
+                    ephemeralPid = id
+                    break
+                }
+            }
+            activeEphemeralPointerIds.insert(ephemeralPid)
+            injectTouch(action: .down, pointerId: ephemeralPid, normPos: cgPos)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
                 guard let self = self, self.isGameModeActive else { return }
-                self.injectTouch(action: .up, pointerId: pid, normPos: cgPos)
-                self.freePointerId(for: trigger)
+                self.injectTouch(action: .up, pointerId: ephemeralPid, normPos: cgPos)
+                self.activeEphemeralPointerIds.remove(ephemeralPid)
             }
             return
         }
@@ -508,30 +524,35 @@ public final class GameInputController: ObservableObject {
 
         var accumulatedDelay: Double = 0
         for (idx, click) in clickNodes.enumerated() {
-            accumulatedDelay += Double(click.delay) / 1000.0
+            accumulatedDelay += Double(max(0, click.delay)) / 1000.0
             let pos = CGPoint(x: click.pos.x, y: click.pos.y)
             let tempPid: UInt64 = 40 + UInt64(idx % 10)
 
             DispatchQueue.main.asyncAfter(deadline: .now() + accumulatedDelay) { [weak self] in
                 guard let self = self, self.isGameModeActive else { return }
+                self.activeEphemeralPointerIds.insert(tempPid)
                 self.injectTouch(action: .down, pointerId: tempPid, normPos: pos)
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + accumulatedDelay + 0.03) { [weak self] in
                 guard let self = self, self.isGameModeActive else { return }
                 self.injectTouch(action: .up, pointerId: tempPid, normPos: pos)
+                self.activeEphemeralPointerIds.remove(tempPid)
             }
         }
     }
 
     private func processDrag(node: KeyMapNodeConfig) {
         guard let start = node.startPos, let end = node.endPos else { return }
-        let dragPid: UInt64 = 55
+        let dragPid = dragPointerId
         let startPos = CGPoint(x: start.x, y: start.y)
         let endPos = CGPoint(x: end.x, y: end.y)
 
-        let initialDelay = Double(node.startDelay ?? 0) / 1000.0
+        let initialDelay = Double(max(0, node.startDelay ?? 0)) / 1000.0
         let steps = 12
         let stepInterval = max(0.01, 0.15 / Double(steps))
+
+        isDragActive = true
+        lastDragEndPos = endPos
 
         DispatchQueue.main.asyncAfter(deadline: .now() + initialDelay) { [weak self] in
             guard let self = self, self.isGameModeActive else { return }
@@ -552,6 +573,7 @@ public final class GameInputController: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + stepInterval * Double(steps + 1)) { [weak self] in
                 guard let self = self, self.isGameModeActive else { return }
                 self.injectTouch(action: .up, pointerId: dragPid, normPos: endPos)
+                self.isDragActive = false
             }
         }
     }
@@ -562,13 +584,22 @@ public final class GameInputController: ObservableObject {
         if let existing = activePointerIds[trigger] {
             return existing
         }
-        let id = nextDynamicPointerId
-        nextDynamicPointerId += 1
-        if nextDynamicPointerId > 30 {
-            nextDynamicPointerId = 10
+        let inUse = Set(activePointerIds.values)
+        // Find an unused pointer ID in range 10...30
+        for _ in 10...30 {
+            let candidate = nextDynamicPointerId
+            nextDynamicPointerId += 1
+            if nextDynamicPointerId > 30 {
+                nextDynamicPointerId = 10
+            }
+            if !inUse.contains(candidate) {
+                activePointerIds[trigger] = candidate
+                return candidate
+            }
         }
-        activePointerIds[trigger] = id
-        return id
+        let fallback = nextDynamicPointerId
+        activePointerIds[trigger] = fallback
+        return fallback
     }
 
     private func freePointerId(for trigger: InputTrigger) {
@@ -593,6 +624,18 @@ public final class GameInputController: ObservableObject {
             }
         }
         activePointerIds.removeAll()
+
+        // Clean up any in-flight ephemeral taps (clickTwice: 35...39, multiClick: 40...49)
+        for pid in activeEphemeralPointerIds {
+            injectTouch(action: .up, pointerId: pid, normPos: .zero)
+        }
+        activeEphemeralPointerIds.removeAll()
+
+        if isDragActive {
+            injectTouch(action: .up, pointerId: dragPointerId, normPos: lastDragEndPos)
+            isDragActive = false
+        }
+
         lastSentMovePositions.removeAll()
     }
 
@@ -602,8 +645,10 @@ public final class GameInputController: ObservableObject {
         let devH = ic.deviceSize.height
         guard devW > 0 && devH > 0 else { return }
 
-        let clampedX = max(0.0, min(1.0, normPos.x))
-        let clampedY = max(0.0, min(1.0, normPos.y))
+        let safeX = (normPos.x.isNaN || normPos.x.isInfinite) ? 0.0 : normPos.x
+        let safeY = (normPos.y.isNaN || normPos.y.isInfinite) ? 0.0 : normPos.y
+        let clampedX = max(0.0, min(1.0, safeX))
+        let clampedY = max(0.0, min(1.0, safeY))
 
         let androidX = Int32(round(clampedX * Double(devW)))
         let androidY = Int32(round(clampedY * Double(devH)))

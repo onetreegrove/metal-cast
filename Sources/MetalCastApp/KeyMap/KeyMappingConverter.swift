@@ -132,11 +132,17 @@ public enum KeyMappingConverter {
         "Key_Backspace": .key(51),
         "Key_Delete": .key(51),
 
-        // Navigation Arrows
+        // Navigation & Editing
         "Key_Left": .key(123),
         "Key_Right": .key(124),
         "Key_Down": .key(125),
         "Key_Up": .key(126),
+        "Key_Home": .key(115),
+        "Key_End": .key(119),
+        "Key_PageUp": .key(116),
+        "Key_PageDown": .key(121),
+        "Key_ForwardDelete": .key(117),
+        "Key_Insert": .key(114),
 
         // Punctuations & Symbols
         "Key_Equal": .key(24),

@@ -75,8 +75,9 @@ public enum ControlMessage: Sendable {
             let isDownOrMove = (action == .down || action == .move)
             let pressure: UInt16 = isDownOrMove ? 0xFFFF : 0
             let buttons: UInt32 = isDownOrMove ? 1 : 0
+            let actionButton: UInt32 = (action == .down) ? 1 : 0
             data.appendBigEndian(pressure) // (2 bytes)
-            data.appendBigEndian(UInt32(1)) // action button (primary) (4 bytes)
+            data.appendBigEndian(actionButton) // action button (4 bytes)
             data.appendBigEndian(buttons) // buttons state (4 bytes)
 
         case .injectScroll(let position, let resolution, let hScroll, let vScroll):

@@ -13,6 +13,7 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
     private let lock = NSLock()
     private var latestPixelBuffer: CVPixelBuffer?
     private var renderedFrameCount = 0
+    private var drawFrameCount = 0
 
     private static let embeddedShaderSource = """
     #include <metal_stdlib>
@@ -116,6 +117,9 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
 
     /// Enqueues the latest decoded frame; overwrites older unrendered frames instantly
     public func enqueueFrame(_ pixelBuffer: CVPixelBuffer) {
+        let w = CVPixelBufferGetWidth(pixelBuffer)
+        let h = CVPixelBufferGetHeight(pixelBuffer)
+
         lock.lock()
         latestPixelBuffer = pixelBuffer
         renderedFrameCount += 1
@@ -123,8 +127,6 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
         lock.unlock()
 
         if count == 1 || count % 60 == 0 {
-            let w = CVPixelBufferGetWidth(pixelBuffer)
-            let h = CVPixelBufferGetHeight(pixelBuffer)
             print("🎨 [MetalRenderer] 收到第 \(count) 帧视频画面数据 (\(w)x\(h))")
         }
     }
@@ -142,13 +144,13 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
             lock.unlock()
             return
         }
-        lock.unlock()
 
         guard let textureCache = textureCache,
               let drawable = view.currentDrawable,
               let renderPassDescriptor = view.currentRenderPassDescriptor,
               let commandBuffer = commandQueue.makeCommandBuffer(),
               let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+            lock.unlock()
             return
         }
 
@@ -183,6 +185,12 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
             &uvTextureRef
         )
 
+        drawFrameCount += 1
+        if drawFrameCount % 120 == 0 {
+            CVMetalTextureCacheFlush(textureCache, 0)
+        }
+        lock.unlock()
+
         guard let yTex = yTextureRef.flatMap(CVMetalTextureGetTexture),
               let uvTex = uvTextureRef.flatMap(CVMetalTextureGetTexture) else {
             encoder.endEncoding()
@@ -194,6 +202,12 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
         encoder.setFragmentTexture(uvTex, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
+
+        commandBuffer.addCompletedHandler { cb in
+            if let error = cb.error {
+                print("❌ [MetalRenderer] GPU CommandBuffer 渲染错误: \(error)")
+            }
+        }
 
         commandBuffer.present(drawable)
         commandBuffer.commit()

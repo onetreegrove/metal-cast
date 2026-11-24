@@ -47,7 +47,8 @@ public final class ScrcpyConnection: @unchecked Sendable {
             self?.handleIncomingConnection(connection)
         }
 
-        newListener.stateUpdateHandler = { state in
+        newListener.stateUpdateHandler = { [weak self] state in
+            guard let self = self else { return }
             switch state {
             case .ready:
                 print("[ScrcpyConnection] 正在端口 \(nwPort) 监听连接 (Audio: \(self.audioEnabled ? "开启" : "关闭"))")
@@ -129,6 +130,13 @@ public final class ScrcpyConnection: @unchecked Sendable {
                 return (pts, len)
             }
 
+            // Sanity check: Video packet payload length must be reasonable (e.g. <= 8MB)
+            guard packetLen >= 0 && packetLen <= 8 * 1024 * 1024 else {
+                print("❌ [ScrcpyConnection] 异常视频包长度: \(packetLen) 字节，丢弃并重置视频缓冲区")
+                videoBuffer.removeAll()
+                break
+            }
+
             // Session metadata packet (flag 1<<63): 12 bytes total, no extra payload
             if (ptsFlags & (UInt64(1) << 63)) != 0 {
                 videoBuffer.removeSubrange(0..<12)
@@ -158,6 +166,7 @@ public final class ScrcpyConnection: @unchecked Sendable {
 
             if isComplete || error != nil {
                 print("[Audio Socket] 连接关闭: \(String(describing: error))")
+                self.handleDisconnect()
             } else {
                 self.readAudioStream(connection)
             }
@@ -187,6 +196,13 @@ public final class ScrcpyConnection: @unchecked Sendable {
                 let pts = rawPtr.loadUnaligned(fromByteOffset: 0, as: UInt64.self).bigEndian
                 let len = Int(rawPtr.loadUnaligned(fromByteOffset: 8, as: UInt32.self).bigEndian)
                 return (pts, len)
+            }
+
+            // Sanity check: Audio packet payload length must be reasonable (e.g. <= 1MB)
+            guard packetLen >= 0 && packetLen <= 1024 * 1024 else {
+                print("❌ [ScrcpyConnection] 异常音频包长度: \(packetLen) 字节，丢弃并重置音频缓冲区")
+                audioBuffer.removeAll()
+                break
             }
 
             // Check config packet flag (bit 1 of 8-byte header: 1 << 62)
@@ -232,6 +248,11 @@ public final class ScrcpyConnection: @unchecked Sendable {
             let result = DeviceMessage.parse(from: controlBuffer)
             guard let msg = result.message, result.bytesConsumed > 0 else { break }
             controlBuffer.removeSubrange(0..<result.bytesConsumed)
+            if case .unknown(let t) = msg {
+                print("⚠️ [ScrcpyConnection] 未知设备消息类型 (0x\(String(format: "%02X", t)))，清空控制缓冲区以防止失步")
+                controlBuffer.removeAll()
+                break
+            }
             onDeviceMessage?(msg)
         }
     }
@@ -272,6 +293,11 @@ public final class ScrcpyConnection: @unchecked Sendable {
             self?.isHeaderReceived = false
             self?.isAudioHeaderReceived = false
             self?.hasDisconnected = false
+            self?.onVideoData = nil
+            self?.onAudioData = nil
+            self?.onDeviceName = nil
+            self?.onDisconnected = nil
+            self?.onDeviceMessage = nil
         }
     }
 }

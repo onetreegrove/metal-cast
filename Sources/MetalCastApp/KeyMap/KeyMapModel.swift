@@ -5,14 +5,26 @@ public struct KeyMapPosition: Codable, Equatable, Sendable {
     public var y: Double
 
     public init(x: Double, y: Double) {
-        self.x = x
-        self.y = y
+        self.x = (x.isNaN || x.isInfinite) ? 0.0 : x
+        self.y = (y.isNaN || y.isInfinite) ? 0.0 : y
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let rawX = try container.decode(Double.self, forKey: .x)
+        let rawY = try container.decode(Double.self, forKey: .y)
+        self.x = (rawX.isNaN || rawX.isInfinite) ? 0.0 : rawX
+        self.y = (rawY.isNaN || rawY.isInfinite) ? 0.0 : rawY
     }
 }
 
 public struct DelayClickNode: Codable, Equatable, Sendable {
     public var delay: Int
     public var pos: KeyMapPosition
+
+    public var effectiveDelay: Int {
+        return max(0, delay)
+    }
 
     public init(delay: Int, pos: KeyMapPosition) {
         self.delay = delay

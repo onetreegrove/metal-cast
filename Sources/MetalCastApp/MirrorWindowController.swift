@@ -61,6 +61,10 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
     }
 
     deinit {
+        let mtk = mtkView
+        DispatchQueue.main.async {
+            mtk?.gameInputController.deactivateGameMode()
+        }
         if let monitor = keyMonitor {
             NSEvent.removeMonitor(monitor)
         }
@@ -237,12 +241,15 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
     }
 
     public func updateResolution(width: Int, height: Int) {
-        self.initialWidth = CGFloat(width)
-        self.initialHeight = CGFloat(height)
-        mtkView.inputController.deviceSize = CGSize(width: width, height: height)
+        guard height > 0 else { return }
 
         DispatchQueue.main.async { [weak self] in
-            guard let self = self, let window = self.window else { return }
+            guard let self = self else { return }
+            self.initialWidth = CGFloat(width)
+            self.initialHeight = CGFloat(height)
+            self.mtkView.inputController.deviceSize = CGSize(width: width, height: height)
+
+            guard let window = self.window else { return }
             let curHeight = self.currentVideoHeight(windowHeight: window.frame.height)
             let newWidth = round(curHeight * (CGFloat(width) / CGFloat(height)))
             let extraW = (self.toolbarPosition == .right && !self.isToolbarHidden) ? self.rightToolbarWidth : 0

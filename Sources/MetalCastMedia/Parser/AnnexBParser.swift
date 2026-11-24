@@ -30,8 +30,11 @@ public final class AnnexBParser: @unchecked Sendable {
         while true {
             guard let (startCodeLen, startIndex) = findStartCode(in: buffer, offset: 0) else {
                 // If buffer is large without any start code, discard garbage to avoid memory leak
+                // Keep last 3 bytes in case a 4-byte start code was split across chunks
                 if buffer.count > 4 * 1024 * 1024 {
+                    let tail = buffer.suffix(3)
                     buffer.removeAll(keepingCapacity: true)
+                    buffer.append(tail)
                 }
                 break
             }

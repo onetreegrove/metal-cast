@@ -14,6 +14,7 @@ public final class VTDecoder: @unchecked Sendable {
 
     public func invalidate() {
         if let session = decompressionSession {
+            VTDecompressionSessionWaitForAsynchronousFrames(session)
             VTDecompressionSessionInvalidate(session)
             decompressionSession = nil
         }

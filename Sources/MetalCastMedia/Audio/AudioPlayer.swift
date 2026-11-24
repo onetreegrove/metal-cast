@@ -81,6 +81,8 @@ public final class AudioPlayer: @unchecked Sendable {
     }
 
     private func updateVolume() {
+        lock.lock()
+        defer { lock.unlock() }
         guard let queue = audioQueue else { return }
         let effectiveVol: Float = isMuted ? 0.0 : max(0.0, min(1.0, volume))
         AudioQueueSetParameter(queue, kAudioQueueParam_Volume, effectiveVol)
@@ -128,12 +130,16 @@ public final class AudioPlayer: @unchecked Sendable {
     }
 
     public func start() {
+        lock.lock()
+        defer { lock.unlock() }
         guard let queue = audioQueue, !isRunning else { return }
         AudioQueueStart(queue, nil)
         isRunning = true
     }
 
     public func pause() {
+        lock.lock()
+        defer { lock.unlock() }
         guard let queue = audioQueue, isRunning else { return }
         AudioQueuePause(queue)
         isRunning = false
