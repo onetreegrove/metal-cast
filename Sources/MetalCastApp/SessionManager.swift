@@ -117,18 +117,22 @@ public final class SessionManager: ObservableObject {
         }
     }
 
-    public func connectWifi(ip: String, port: Int = 5555) async {
+    @discardableResult
+    public func connectWifi(ip: String, port: Int = 5555) async -> Bool {
         do {
             statusMessage = "正在通过 Wi-Fi 连接 \(ip):\(port) ..."
             let success = try await ADBManager.shared.connectWifi(ip: ip, port: port)
             if success {
                 statusMessage = "Wi-Fi 连接成功: \(ip):\(port)"
                 await refreshDevices()
+                return true
             } else {
                 statusMessage = "Wi-Fi 连接未响应，请检查手机 IP 与端口"
+                return false
             }
         } catch {
             statusMessage = "Wi-Fi 连接失败: \(error.localizedDescription)"
+            return false
         }
     }
 
@@ -150,7 +154,8 @@ public final class SessionManager: ObservableObject {
         }
     }
 
-    public func connectDiscoveredWirelessDevice(_ device: DiscoveredWirelessDevice) async {
+    @discardableResult
+    public func connectDiscoveredWirelessDevice(_ device: DiscoveredWirelessDevice) async -> Bool {
         await connectWifi(ip: device.ip, port: device.port)
     }
 
@@ -273,8 +278,7 @@ public final class SessionManager: ObservableObject {
             connection.onDisconnected = { [weak self] in
                 print("🛑 [Session] 收到设备连接中断通知")
                 Task { @MainActor in
-                    self?.statusMessage = "连接已中断"
-                    self?.stopMirroring()
+                    self?.stopMirroring(finalStatus: "连接已中断")
                 }
             }
 
@@ -304,21 +308,27 @@ public final class SessionManager: ObservableObject {
             // 6. 激活剪贴板监控
             ClipboardManager.shared.startMonitoring(connection: connection)
 
-            // 7. 熄屏参数处理
-            if screenOffOnStart {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                connection.sendControlMessage(.setScreenPower(on: false))
-            }
-
             winController.showWindow(nil)
             winController.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
 
             statusMessage = "投屏运行中 (音频: \(isAudioEnabled ? "开启" : "关闭"), 编码: \(selectedCodec.uppercased()))"
 
+            // 7. 熄屏参数处理
+            if screenOffOnStart {
+                Task { @MainActor [weak self, weak winController] in
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    guard let self, let winController,
+                          self.isRunning,
+                          self.mirrorWindowController === winController,
+                          let conn = self.activeConnection else { return }
+                    conn.sendControlMessage(.setScreenPower(on: false))
+                    winController.setScreenPowerVisual(isOff: true)
+                }
+            }
+
         } catch {
-            statusMessage = "启动失败: \(error.localizedDescription)"
-            stopMirroring()
+            stopMirroring(finalStatus: "启动失败: \(error.localizedDescription)")
         }
     }
 
@@ -330,7 +340,7 @@ public final class SessionManager: ObservableObject {
         }
     }
 
-    public func stopMirroring() {
+    public func stopMirroring(finalStatus: String = "已断开连接") {
         guard isRunning else { return }
         print("🛑 [Session] 正在停止投屏会话...")
 
@@ -356,6 +366,6 @@ public final class SessionManager: ObservableObject {
         currentDecoder = nil
 
         isRunning = false
-        statusMessage = "已断开连接"
+        statusMessage = finalStatus
     }
 }

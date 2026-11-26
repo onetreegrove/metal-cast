@@ -12,12 +12,12 @@ public final class FileManagerWindowController: NSWindowController, NSWindowDele
         self.onClosed = onClosed
 
         let window = NSWindow(
-            contentRect: NSRect(x: 180, y: 160, width: 920, height: 620),
+            contentRect: NSRect(x: 180, y: 160, width: 960, height: 640),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.minSize = NSSize(width: 780, height: 520)
+        window.minSize = NSSize(width: 820, height: 560)
         window.title = viewModel.windowTitle
         window.isReleasedWhenClosed = false
         window.contentViewController = NSHostingController(rootView: FileManagerView(viewModel: viewModel))

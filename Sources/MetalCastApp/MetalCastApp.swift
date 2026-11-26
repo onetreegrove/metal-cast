@@ -10,7 +10,7 @@ struct MetalCastApp: App {
         WindowGroup("MetalCast 控制中心") {
             DashboardView()
         }
-        .windowResizability(.contentSize)
+        .defaultSize(width: 960, height: 640)
         .commands {
             CommandGroup(replacing: .newItem) {}
         }

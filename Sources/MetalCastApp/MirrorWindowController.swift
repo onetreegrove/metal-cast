@@ -20,8 +20,8 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
     private var keyMonitor: Any?
     private var appResignObserver: Any?
 
-    private let rightToolbarWidth: CGFloat = 42
-    private let bottomToolbarHeight: CGFloat = 38
+    private let rightToolbarWidth: CGFloat = 44
+    private let bottomToolbarHeight: CGFloat = 40
 
     public var onClose: (() -> Void)?
 
@@ -186,7 +186,7 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
             } else if flags == [.command, .shift] {
                 switch event.charactersIgnoringModifiers?.lowercased() {
                 case "p":
-                    self.toolbarView.delegate?.toolbarDidToggleScreenPower(true)
+                    self.toolbarView.toggleScreenPower()
                     return nil
                 case "s":
                     self.toolbarDidClickScreenshot()
@@ -238,6 +238,10 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
     public func setKeyMapProfile(_ profile: KeyMapProfile?, name: String) {
         mtkView.gameInputController.setProfile(profile, name: name)
         toolbarView.setGameModeActive(mtkView.gameInputController.isGameModeActive)
+    }
+
+    public func setScreenPowerVisual(isOff: Bool) {
+        toolbarView.setScreenOff(isOff)
     }
 
     public func updateResolution(width: Int, height: Int) {
@@ -410,6 +414,8 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
 
         let newPosition: DockToolbarPosition = (toolbarPosition == .right) ? .bottom : .right
         self.toolbarPosition = newPosition
+        // Update outer dock constraints before rebuilding toolbar internals so opposing axis limits never collide.
+        applyLayoutConstraints()
         toolbarView.setPosition(newPosition)
 
         // Adjust window dimensions smoothly
@@ -424,7 +430,6 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
             frame.size.width += rightToolbarWidth
         }
 
-        applyLayoutConstraints()
         window.setFrame(frame, display: true, animate: true)
     }
 
