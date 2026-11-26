@@ -45,8 +45,9 @@
    3. `ANDROID_ADB_SERVER_ADDRESS` 与 `ANDROID_ADB_SERVER_PORT`：主机仅允许 `127.0.0.1`、`localhost` 或 `::1`（为空时默认 `127.0.0.1`），端口须在 `1...65535`（为空时默认 `5037`）；若二者与 `ADB_SERVER_SOCKET` 同时存在且冲突，抛出 `ADBFileError.incompatibleEndpoint`。
    4. 未配置上述变量时回退默认值 `127.0.0.1:5037`。
 2. **CLI 统一参数与环境清洗：**
-   - 所有通过 `ADBProcessRunner` 启动的 `adb` 子进程统一前置参数 `["-L", "tcp:\(endpoint.host):\(endpoint.port)"]`。
-   - 启动子进程前从 `process.environment` 中移除 `ADB_SERVER_SOCKET`、`ANDROID_ADB_SERVER_PORT`、`ANDROID_ADB_SERVER_ADDRESS`，避免原生 `adb` 在同时存在 `-L` 与 `ADB_SERVER_SOCKET` 时报错退出，确保投屏、`adb devices` 与 Socket 文件通道永远连接同一 ADB Server。
+   - 所有通过 `ADBProcessRunner` 启动的 `adb` 子进程（包括 `run(args:)` 与供投屏 `executeServer` 使用的 `spawn(args:onOutput:)`）统一前置参数 `["-L", "tcp:\(endpoint.host):\(endpoint.port)"]`。
+   - `Process.environment` 默认为 `nil`（直接继承父进程环境），因此启动子进程前必须先复制 `ProcessInfo.processInfo.environment` 为可变字典，从中移除 `ADB_SERVER_SOCKET`、`ANDROID_ADB_SERVER_PORT`、`ANDROID_ADB_SERVER_ADDRESS` 后再赋值给 `process.environment`，避免原生 `adb` 在同时存在 `-L` 与 `ADB_SERVER_SOCKET` 时报错退出，确保投屏、`adb devices` 与 Socket 文件通道永远连接同一 ADB Server。
+   - 若 `resolveAdbPath()` 未找到可用 `adb` 可执行文件，应明确抛出错误或通过 `PATH` 解析真实路径，避免将裸字符串 `"adb"` 传入 `URL(fileURLWithPath:)`。
 3. **`ADBProcessRunner.run(args:)` 非阻塞改造：**
    - 保留现有 `Pipe.readabilityHandler` 异步流式读取，移除阻塞 Swift Concurrency 协作线程池的 `process.waitUntilExit()`。
    - 改用 `withTaskCancellationHandler` 包裹 `withCheckedThrowingContinuation`，在 `process.terminationHandler` 中完成管道余量刷新与唯一一次 continuation resume（使用 `NSLock` 保护完成状态）；外部 Task 取消时主动调用 `process.terminate()`。 [ADBProcessRunner.swift](../Sources/MetalCastCore/ADB/ADBProcessRunner.swift)
@@ -68,7 +69,8 @@
 
 1. **跟踪通道与降级：**
    - 在后台建立长连接向本地 ADB Server 发送 `host:track-devices-l`，持续循环读取「4 位十六进制长度 + UTF‑8 设备明细列表」（长度为 `0000` 表示当前无设备）。
-   - 仅当旧版自定义 ADB Server 对 `host:track-devices-l` 返回 `FAIL` 时，降级为建立 `host:track-devices` 长连接；每次收到推送后，再在同一端点通过独立 Host Socket 发送 `host:devices-l` 读取完整明细（不启动 `adb` CLI 子进程）。 [AOSP 设备跟踪服务](https://android.googlesource.com/platform/packages/modules/adb/+/refs/heads/main/docs/dev/services.md)
+   - 仅当旧版自定义 ADB Server 对 `host:track-devices-l` 返回 `FAIL` 时，降级为建立 `host:track-devices` 长连接；每次收到推送后，再在同一端点通过独立 Host Socket 发送 `host:devices-l` 读取完整明细（不启动 `adb` CLI 子进程）。
+   - 控制中心 `SessionManager` 直接消费同一条设备跟踪快照（并在用户点击刷新时触发一次即时 `host:devices-l` 与无线 mDNS 扫描），避免文件窗口与控制中心对设备在线状态、`transportId` 的感知出现分叉。 [AOSP 设备跟踪服务](https://android.googlesource.com/platform/packages/modules/adb/+/refs/heads/main/docs/dev/services.md)
 2. **会话代次（`serverGeneration`）与失效策略：**
    - 每次跟踪通道首次连通、断线重连成功或触发 `start-server` 后，`serverGeneration: UInt64` 单调递增。
    - 会话标识 `ADBFileSessionID` 由 `(endpoint, serverGeneration, transportId, serial)` 四元组构成。
@@ -153,7 +155,7 @@ public protocol ADBFileServicing: Actor {
     func listDirectory(sessionId: ADBFileSessionID, relativeComponents: [Data], requestId: UUID) -> AsyncThrowingStream<ADBDirectoryBatch, Error>
     func enqueueUpload(sessionId: ADBFileSessionID, targetComponents: [Data], items: [ADBUploadPlanItem]) async throws -> [UUID]
     func enqueueDownload(sessionId: ADBFileSessionID, sourceComponents: [Data], items: [ADBDownloadPlanItem], localDirectory: URL) async throws -> [UUID]
-    func deleteFiles(sessionId: ADBFileSessionID, directoryComponents: [Data], items: [ADBDeleteTarget]) async throws -> [ADBDeleteItemResult]
+    func enqueueDelete(sessionId: ADBFileSessionID, directoryComponents: [Data], items: [ADBDeleteTarget]) async throws -> UUID
     func cancelTransfer(taskId: UUID) async
     func cancelWindowTasks(sessionId: ADBFileSessionID) async
     func retryLedgerCleanup(entryId: UUID) async throws
@@ -162,7 +164,7 @@ public protocol ADBFileServicing: Actor {
 }
 ```
 
-> 补充接口：`ADBFileService` 对界面提供 `openSession`、`listDirectory`、`enqueueUpload`、`enqueueDownload`、`deleteFiles`、`cancelTransfer` 及残片账本操作（`retryLedgerCleanup`、`dismissLedgerEntry`）。UI 更新同时校验 `(sessionId, requestId)`。
+> 补充接口：`ADBFileService` 对界面提供 `openSession`、`listDirectory`、`enqueueUpload`、`enqueueDownload`、`enqueueDelete`、`cancelTransfer` 及残片账本操作（`retryLedgerCleanup`、`dismissLedgerEntry`）。批量删除同样进入所属设备的 FIFO 写队列并作为单条删除任务在抽屉展示（设备空闲时立即执行完毕并弹出逐项结果报告；设备正在大文件传输时可清晰看到排队状态且在执行前可取消，不阻塞界面弹窗）。UI 更新同时校验 `(sessionId, requestId)`。
 
 ---
 
@@ -218,7 +220,7 @@ public protocol ADBFileServicing: Actor {
 | `DNT2` 条目 / `DONE` | `76 + namelen` | `0..72` 同 `STA2` 响应结构 · `72..76 namelen(U32)` · `76.. nameBytes` | `DONE` 发出同样 76 字节结构：读掉 4 字节标签后必须再精确消费剩余 72 字节；单条目 `error != 0` 保留该条目错误标识，不影响同批合法条目 |
 | `SEND` / `RECV` 请求 | `8 + len` | `0..4 "SEND"/"RECV"` · `4..8 paramLen` · `8.. paramBytes` | `paramLen <= 1024`；`SEND` 参数为 `<tmpPath>,33188`（即 `0o100644`），`RECV` 为 `<remotePath>` |
 | `DATA` 帧 | `8 + len` | `0..4 "DATA"` · `4..8 dataLen` · `8.. payload` | `dataLen <= 65536`（64 KiB） |
-| `DONE`（传输结束） | 8 B | `0..4 "DONE"` · `4..8 mtime(U32)` | 上传填秒级 mtime（超出 `UInt32` 范围用可表示当前时间）；下载固定 `0` |
+| `DONE`（传输结束） | 8 B | `0..4 "DONE"` · `4..8 mtime(U32)` | 上传时由客户端发送（填秒级 mtime，超出 `UInt32` 范围用可表示当前时间）；下载时由服务端返回（长度/mtime 字段固定 `0`） |
 | `OKAY`（上传确认） | 8 B | `0..4 "OKAY"` · `4..8 msglen(U32)` | 必须读满完整 8 字节并校验 `msglen == 0`，非零按协议错误处理并断开 |
 | `FAIL`（Sync 错误） | `8 + msglen` | `0..4 "FAIL"` · `4..8 msglen(U32)` · `8.. utf8Error` | 与 Host `FAIL` 的 hex 长度不同，此处为小端二进制长度 |
 | `QUIT` | 8 B | `0..4 "QUIT"` · `4..8 0x00000000` | 健康结束 `sync:` 会话前发送 |
@@ -253,22 +255,35 @@ public protocol ADBFileServicing: Actor {
 1. **受限目录精确规则**：
    - 当相对路径分量数组 `components.count >= 2` 且 `components[0]` 按 ASCII 大小写不敏感等于 `"android"`、`components[1]` 按 ASCII 大小写不敏感等于 `"data"` 或 `"obb"` 时，判定为首版受限路径。
    - **UI 表现**：进入 `Android` 目录浏览时，列表照常展示 `data` 和 `obb` 条目，但标记 `isRestricted = true`，界面置灰禁用双击进入、下载与删除，并附带提示标签「首版不支持访问」。
-   - **服务层防线**：`listDirectory`、`enqueueUpload`、`enqueueDownload`、`deleteFiles` 对任何命中上述条件的请求直接拒绝并返回 `ADBFileError.restrictedPath`。
+   - **服务层防线**：`listDirectory`、`enqueueUpload`、`enqueueDownload`、`enqueueDelete` 对任何命中上述条件的请求直接拒绝并返回 `ADBFileError.restrictedPath`。
 2. **路径边界与符号链接策略**：
    - 根本身可读，根下普通子项可操作。根以下出现的符号链接仅作为条目展示（标记 `kind == .symlink`），不允许作为目录导航或当普通文件读写/删除。
    - 最后一个路径分量统一使用 `lstat` 语义（`LST2` 或旧版 `STAT`）确认类型。每次执行 Shell 写操作时，必须在同一条 Shell 命令内 `cd -P` 进入物理父目录并校验 `pwd -P` 等于预期物理父路径，随后使用相对文件名（`-- './<name>'` 或已校验不含 `/` 的相对名）操作，将校验与操作的时间差压至最小。
 
 ### 3.3 空目录访问探测与大目录交付
 
-1. **空目录访问探测模板**：AOSP 的 `LIST`/`LIS2` 在部分设备权限不足时会返回 0 条目而非报错。当目录枚举结果为空时，向设备发送以下访问探测模板（不解析 `ls` 输出，仅依据数字退出码判定）：
+1. **空目录访问探测模板**：AOSP 的 `LIST`/`LIS2` 在部分设备权限不足时会返回 0 条目而非报错。当目录枚举结果为空时，向设备发送以下访问探测模板（不解析 `ls` 输出，仅依据数字退出码判定；为避免 `$(pwd -P)` 吞掉路径末尾可能出现的换行符，统一用末尾附加 `\nx` 哨兵的方式精确比对物理路径）：
    ```sh
-   # 探测子目录时传入物理父路径与目标分量；探测根目录时仅验证根本身
+   # 1) 探测子目录时：传入物理父路径与目标分量
    cd -P -- '<parentPhysicalPath>' 2>/dev/null || exit 12
-   [ "$(pwd -P)" = '<parentPhysicalPath>' ] || exit 12
+   p=$(pwd -P && echo x) || exit 12
+   [ "$p" = '<parentPhysicalPath>
+   x' ] || exit 12
    [ -e '<dirName>' ] || exit 10
    [ -L '<dirName>' ] && exit 11
    [ -d '<dirName>' ] || exit 11
    cd -P -- '<dirName>' 2>/dev/null || exit 13
+   [ -r . ] && [ -x . ] || exit 13
+   ```
+   ```sh
+   # 2) 探测共享存储根目录本身为空时：仅验证物理根存在、非符号链接且可读可执行
+   [ -e '<physicalRoot>' ] || exit 10
+   [ -L '<physicalRoot>' ] && exit 11
+   [ -d '<physicalRoot>' ] || exit 11
+   cd -P -- '<physicalRoot>' 2>/dev/null || exit 13
+   p=$(pwd -P && echo x) || exit 12
+   [ "$p" = '<physicalRoot>
+   x' ] || exit 12
    [ -r . ] && [ -x . ] || exit 13
    ```
    - 退出码语义：`0` = 合法可读空目录；`10` = 目录已不存在；`11` = 已变为非目录或符号链接；`12` = 父目录物理路径已变化；`13` = 权限不足或无法读取。 [AOSP LIST 实现](https://android.googlesource.com/platform/packages/modules/adb/+/refs/heads/main/daemon/file_sync_service.cpp#197)
@@ -291,13 +306,13 @@ public protocol ADBFileServicing: Actor {
 #### 1) 入队预检与批量冲突策略
 1. 通过 `NSOpenPanel`（允许多选文件、禁止选目录）获取本地文件 URL，打开 `FileHandle` 前通过 `lstat` / `URLResourceValues` 复核为本地普通文件。
 2. 校验源文件名：不含 `/sdcard` 禁止字符（`? " * : < > \ |` 及控制字符）且单分量 `<= 255` UTF‑8 字节；失败文件在预检结果中直接标明原因跳过，不阻塞其他文件。
-3. 扫描当前远端目录列表，按**大小写不敏感**比对同名项：
-   - 若存在任意冲突项，在正式入队前弹出**统一批量冲突策略面板**（展示冲突文件清单，提供「跳过」「保留两份」及「应用到本次全部冲突」开关；支持逐项或一键应用），避免传输队列中途弹模态窗阻塞后续任务。
+3. 入队前拉取/使用当前远端目录新鲜快照（支持枚举期间阻塞等待或快速重扫当前目录，避免依赖过期缓存），按**大小写不敏感**比对远端已有项以及**同批次待上传文件互相之间**的同名冲突（例如从 Mac 不同目录同时选中 `a/photo.jpg` 与 `b/Photo.jpg`）：
+   - 若存在任意冲突项，在正式入队前弹出**统一批量冲突策略面板**（展示冲突文件清单，提供「跳过」「保留两份」及「应用到本次全部冲突」开关；支持逐项或一键应用；若加 `(2)` 后缀将超过 255 UTF‑8 字节则直接标记无法自动重命名并禁用该项「保留两份」），避免传输队列中途弹模态窗阻塞后续任务。
 4. **自动重命名规则（`名称 (2).扩展名`）**：
    - 若文件名为 `.name`（以 `.` 开头且后续不再含 `.`）或不含 `.`，视为无扩展名，生成 `<名称> (2)`；否则按最后一个 `.` 拆分主干与扩展名，生成 `<主干> (2).<扩展名>`（如 `archive.tar.gz` → `archive.tar (2).gz`）。
    - 序号从 `2` 起逐一尝试至上限 `999`（跳过远端当前目录大小写不敏感已存在项以及本批前面已分配的候选名）。
    - 每次生成候选名均校验 `candidate.utf8.count <= 255`；若加后缀超限，直接报错提示文件名过长，绝不静默截断文件名。
-5. 校验远端暂存路径 `<parentPhysicalPath>/.metalcast-tmp-<uuid>/payload,33188` 总字节数 `<= 1024`。
+5. 校验远端暂存路径 `<parentPhysicalPath>/.metalcast-tmp-<uuid>/payload,33188` 以及最终目标路径 `<parentPhysicalPath>/<finalTargetName>` 的 UTF‑8 字节数均 `<= 1024`（确保后续 `LST2`/`STAT`/`RECV` 均不会因超过 Sync 1024 字节上限而不可访问）。
 
 #### 2) 清理账本（Ledger）与隐藏临时子目录
 - **账本路径**：`~/Library/Application Support/MetalCast/file-transfer-ledger.json`，使用 `Data.write(to:options:.atomic)` 落盘。
@@ -329,15 +344,17 @@ public protocol ADBFileServicing: Actor {
 - **分块写入**：账本落盘成功后再在目标目录独占创建 `.metalcast-tmp-<uuid>`（`mkdir -- '<tmpDir>'`）。通过 `SEND <tmpPath>,33188` 以每块最大 64 KiB 流式读取本地文件并写入连接；写完一块等待连接完成回调后再读下一块，同时并发监听提前到达的 Sync `FAIL`。传输结束发 `DONE`（秒级 mtime），读满 8 字节 `OKAY` 且校验 `msglen == 0`。 [AOSP SEND 写入行为](https://android.googlesource.com/platform/packages/modules/adb/+/refs/heads/main/daemon/file_sync_service.cpp#518)
 
 #### 3) 实测提交能力探测与提交 / 清理 Shell 模板
-- **Shell 单引号安全转义**：所有动态路径参数不经双引号展开，统一将字符串中每个单引号 `'` 替换为 `'\''` 后再用 `'...'` 包裹；并先校验不含 `\0` 与非法控制字符。
-- **提交能力实测探测（每会话首次上传前）**：不依赖解析 `mv --help` 文案，在目标目录（或共享存储根）创建一个临时探测目录 `.metalcast-probe-<uuid>` 及空文件 `a`，依次实测：
+- **Shell 单引号安全转义**：所有动态路径参数不经双引号展开，统一先校验**不含 `\0`（NUL 字节）** 后，将字符串中每个单引号 `'` 替换为 `'\''` 再用 `'...'` 包裹。单引号转义器本身放行非 NUL 的合法 UTF‑8 字节（包括 `\n` 等既有文件名字符），以确保浏览与删除手机端含换行/引号的历史文件不受阻；对换行等控制字符的禁止规则仅在「上传新建与自动重命名」入口强制拦截。
+- **提交能力实测探测（每会话首次上传前）**：不依赖解析 `mv --help` 文案，在目标目录（或共享存储根）创建一个临时探测目录 `.metalcast-probe-<uuid>` 及空文件 `a`，依次实测并在探测结束后逐项清理（`rm --` 与 `rmdir --`）：
   1. 尝试 `mv -nT -- a b && [ -f b ] && [ ! -e a ]`；成功则缓存 `commitMode = .mvNoClobberNoTarget`。
   2. 若 `-T` 报错，尝试 `mv -n -- a c && [ -f c ] && [ ! -e a ]`；成功则缓存 `commitMode = .mvNoClobberWithGuard`。
   3. 若仍失败，缓存 `commitMode = .unsupported`，清理探测残片并在上传入口明确提示设备不支持安全提交。
-- **上传提交 Shell 模板**：
+- **上传提交 Shell 模板**（同一次 Shell 调用内完成校验、移动、复核并顺手移除空暂存目录）：
   ```sh
   cd -P -- '<parentPhysicalPath>' 2>/dev/null || exit 20
-  [ "$(pwd -P)" = '<parentPhysicalPath>' ] || exit 20
+  p=$(pwd -P && echo x) || exit 20
+  [ "$p" = '<parentPhysicalPath>
+  x' ] || exit 20
   [ -f '<tmpDir>/<tmpPayload>' ] && [ ! -L '<tmpDir>/<tmpPayload>' ] || exit 21
   [ ! -e '<dstName>' ] && [ ! -L '<dstName>' ] || exit 22
   # commitMode == .mvNoClobberNoTarget 时执行:
@@ -346,13 +363,16 @@ public protocol ADBFileServicing: Actor {
   # mv -n -- '<tmpDir>/<tmpPayload>' '<dstName>' || exit 23
   [ ! -e '<tmpDir>/<tmpPayload>' ] && [ ! -L '<tmpDir>/<tmpPayload>' ] || exit 24
   [ -f '<dstName>' ] && [ ! -L '<dstName>' ] || exit 24
+  rmdir -- '<tmpDir>' 2>/dev/null || exit 27
   ```
-  - **退出码语义**：`0` = 提交成功；`20` = 物理父目录变化；`21` = 暂存文件丢失或类型异常；`22` = 目标名称已存在（触发跳过或递增重命名）；`23` = `mv` 执行失败；`24` = 命令返回 0 但暂存仍在或最终位置非普通文件（按同名冲突或提交失败处理）。
+  - **退出码语义**：`0` = 提交成功且空暂存目录已清理；`20` = 物理父目录变化；`21` = 暂存文件丢失或类型异常；`22` = 目标名称已存在（触发跳过或递增重命名）；`23` = `mv` 执行失败；`24` = `mv` 返回 0 但暂存仍在或最终位置非普通文件（在 `mv -n` 无 `-T` 降级模式下，若并发创建了同名目录会导致 `payload` 被移入 `<dstName>/payload`，因此需报错提示并核查，禁止盲目重命名重传）；`27` = 目标文件已成功提交，仅空暂存目录 `rmdir` 未能移除（任务标记完成并保留 `cleanupPending` 账本项供清理）。
   - **竞态说明**：Android Toybox 的 `mv -n` 实现存在先 `stat` 再 `rename` 的窗口，外部写入者同时抢占目标名时仍存在 TOCTOU 竞态，因此「保留两份」仅对已观察到的同名项和应用内串行队列提供保护。 [Toybox `mv` 实现](https://android.googlesource.com/platform/external/toybox/+/master/toys/posix/cp.c#440)
 - **暂存清理 Shell 模板**（严禁使用 `rm -rf`）：
   ```sh
   cd -P -- '<parentPhysicalPath>' 2>/dev/null || exit 20
-  [ "$(pwd -P)" = '<parentPhysicalPath>' ] || exit 20
+  p=$(pwd -P && echo x) || exit 20
+  [ "$p" = '<parentPhysicalPath>
+  x' ] || exit 20
   [ -d '<tmpDir>' ] && [ ! -L '<tmpDir>' ] || exit 25
   if [ -f '<tmpDir>/<tmpPayload>' ] && [ ! -L '<tmpDir>/<tmpPayload>' ]; then
     rm -- '<tmpDir>/<tmpPayload>' || exit 26
@@ -379,19 +399,21 @@ public protocol ADBFileServicing: Actor {
    - 收到 `DONE` 后：
      - 仅当 `isSizeReliable == true` 时校验「已写入字节 == 预期 64 位大小」；**v1 元数据禁止触发长度不符报错**。
      - 再查一次源文件 `LST2`/`STAT` 元数据是否发生变化（如文件在传输中被替换或截断）。任一不符则删除 `.part` 临时文件并提示重新下载。
-   - 关闭文件前按可用精度写回修改时间（`utimensat` / `FileManager.setAttributes`）。
+   - 关闭文件前通过 `futimens(fd, ...)` 按可用精度直接在已打开的文件描述符上写回修改时间（避免基于路径的竞态）。
 3. **排他发布**：
    - 在同一 Mac 目录下调用 `renamex_np(tempPath, finalPath, RENAME_EXCL)` 原子重命名。
-   - 若传输期间目标名被占用返回 `EEXIST`：策略为「跳过」时删除 `.part` 并记为 `skipped`；策略为「保留两份」时重新扫描可用 `名称 (k).扩展名` 再执行排他重命名。
+   - 若传输期间目标名被占用返回 `EEXIST`：策略为「跳过」时删除 `.part` 并记为 `skipped`；策略为「保留两份」时循环重新扫描可用 `名称 (k).扩展名`（`k` 至多 `999` 且校验 `<= 255` UTF‑8 字节）再执行排他重命名。
    - 失败与取消仅删除本任务的 `.part` 临时文件。下载完成后任务条目提供「在 Finder 中显示」。
 
 ### 4.3 删除所选文件
 
-1. **确认清单冻结**：确认对话框展示设备名、当前物理目录、待删除文件名清单与总数量，并明确标注「永久删除（不经过回收站）」。仅允许删除当前目录选中的普通文件；目录、符号链接、受限项及非无损 UTF‑8 项在确认前即拒绝选中。
+1. **确认清单冻结与写队列入队**：确认对话框展示设备名、当前物理目录、待删除文件名清单与总数量，并明确标注「永久删除（不经过回收站）」。仅允许删除当前目录选中的普通文件；目录、符号链接、受限项及非无损 UTF‑8 项在确认前即拒绝选中。用户确认后调用 `enqueueDelete(...)` 进入该设备的 FIFO 写队列（设备空闲时立即执行完毕并弹出逐项结果报告；若当前正有大文件传输占用写队列，则作为一条可取消的排队删除任务展示在任务抽屉中，不阻塞界面操作）。
 2. **逐项非递归 Shell 模板**（严禁 `-r` 与 `-f`）：
    ```sh
    cd -P -- '<parentPhysicalPath>' 2>/dev/null || exit 33
-   [ "$(pwd -P)" = '<parentPhysicalPath>' ] || exit 33
+   p=$(pwd -P && echo x) || exit 33
+   [ "$p" = '<parentPhysicalPath>
+   x' ] || exit 33
    if [ -L '<targetName>' ]; then exit 31; fi
    if [ ! -e '<targetName>' ]; then exit 30; fi
    if [ ! -f '<targetName>' ]; then exit 32; fi
@@ -438,11 +460,12 @@ public protocol ADBFileServicing: Actor {
 - **窗口规格**：由 `FileManagerWindowController` 托管独立 `NSWindow`，默认尺寸 `920 × 620`，最小尺寸 `780 × 520`，标题格式 `手机文件 - <deviceName>`。
 - **顶部工具栏**：返回上一级、刷新、可点击的面包屑路径栏（根目录显示「共享存储」）、上传文件、下载所选、删除所选、任务与清理抽屉切换按钮（带进行中任务数量角标）。
 - **主文件列表**：
-  - 列构成：**名称**（文件类型图标 + 控制字符可见转义 + 符号链接角标 + `Android/data` 与 `Android/obb` 置灰徽章）、**类型**、**大小**（目录或 `isSizeReliable == false` 显示 `—`）、**修改时间**。
-  - 默认排序：目录在前、文件在后，同组按名称本地化升序；支持点击表头切换排序字段与方向。支持 `Cmd+A` 全选、多选下载与多选删除。
+  - 列构成：**名称**（文件类型图标 + 控制字符可见转义 + 符号链接角标 + `Android/data` 与 `Android/obb` 置灰徽章）、**类型**、**大小**（目录或 `isSizeReliable == false` 严格显示 `—` / `未知 (v1)`，严禁直接显示可能已截断回绕的 32 位 v1 数值）、**修改时间**。
+  - 默认排序：目录在前、文件在后，同组按名称本地化升序；支持点击表头切换排序字段与方向。支持单击高亮选中目录/链接行（同时保持「下载所选/删除所选」禁用）、`Cmd+A` 全选可操作普通文件、多选下载与多选删除。
 - **底部状态栏与可折叠任务/清理抽屉**：
   - 状态栏展示当前设备连接方式（USB / Wi‑Fi）、当前目录项统计、活跃传输摘要。
-  - 抽屉上半区展示当前与近期任务进度/状态/重试/「在 Finder 中显示」；下半区仅在存在未收敛账本记录时展示残留清理条（显示路径 +「重试清理」+「忽略并移除记录」）。
+  - 抽屉默认在无活跃任务且无未收敛账本时收起（以保证 `780 × 520` 最小窗口下文件列表可用高度），有任务入队或存在未收敛账本时自动展开。
+  - 抽屉内部采用与原型对齐的**双标签页结构**（「任务队列」与「清理账本」，各带计数徽章）：「任务队列」展示当前窗口绑定设备的上传/下载/删除任务（同时展示全局传输槽 `0/2` 占用），终态均提供「清除记录」（`failed` 与 `cancelled` 提供「重试」）；当存在未收敛账本记录时，在「任务队列」顶部同步显示引导横幅，并在「清理账本」页逐条展示「设备序列号 + 目录路径 + 临时目录名」及「重试清理」「忽略并移除记录」按钮。
 - **可区分空态与异常态**：
   1. 空目录：「此文件夹为空」+ 快捷上传按钮。
   2. 权限不足：「无权限访问此目录」提示。
@@ -456,10 +479,10 @@ public protocol ADBFileServicing: Actor {
   - 若该设备会话存在未提交或正在提交的任务，弹窗确认「关闭窗口将取消未开始的传输并尝试清理当前临时文件，确认关闭？」；正在提交中的任务提示等待提交回执或转入账本 `pendingConfirmation`。
   - 确认关闭后调用 `cancelWindowTasks(sessionId:)` 并从 `FileManagerWindowCoordinator` 移除控制器。
 - **应用级退出（`MetalCastApp.swift` 中的 `AppDelegate.applicationShouldTerminate(_:)`）**：
-  - 检查 `ADBFileService` 是否存在活跃传输或正在提交的任务：
-    - 若无活跃任务，直接返回 `.terminateNow`。
+  - 检查 `ADBFileService` 是否存在活跃传输、排队删除或正在提交的任务：
+    - 若无活跃任务，直接返回 `.terminateNow`（在 `applicationWillTerminate` 继续执行 `SessionManager.shared.stopMirroring()`）。
     - 若存在活跃任务，弹窗确认是否中断退出；用户取消则返回 `.terminateCancel`。
-    - 用户确认退出后，返回 `.terminateLater`：在后台 Task 中取消所有未提交传输、限时（上限 `5 秒`）等待暂存清理及 `file-transfer-ledger.json` 原子落盘完成后，调用 `NSApp.reply(toApplicationShouldTerminate: true)` 放行退出（替代原先 `applicationWillTerminate` 中无等待的异步 `Task`）。 [MetalCastApp.swift](../Sources/MetalCastApp/MetalCastApp.swift)
+    - 用户确认退出后，返回 `.terminateLater`：在后台 Task 中同步停止投屏（`SessionManager.shared.stopMirroring()`）、取消所有未进入提交阶段的传输与排队删除、在总上限 `5 秒` 预算内等待已发出的 `committing` 命令收尾与暂存清理，并将仍未收尾的提交标为 `pendingConfirmation`、未清理暂存标为 `cleanupPending` 后以 `Data.write(to:options:.atomic)` 落盘 `file-transfer-ledger.json`，最终调用 `NSApp.reply(toApplicationShouldTerminate: true)` 放行退出（替代原先 `applicationWillTerminate` 中无等待的异步 `Task`）。 [MetalCastApp.swift](../Sources/MetalCastApp/MetalCastApp.swift)
 
 ---
 

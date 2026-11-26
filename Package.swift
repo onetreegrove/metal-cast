@@ -36,6 +36,11 @@ let package = Package(
             name: "MetalCastApp",
             dependencies: ["MetalCastCore", "MetalCastMedia"],
             path: "Sources/MetalCastApp"
+        ),
+        .testTarget(
+            name: "MetalCastCoreTests",
+            dependencies: ["MetalCastCore"],
+            path: "Tests/MetalCastCoreTests"
         )
     ]
 )

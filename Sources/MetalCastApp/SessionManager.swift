@@ -29,6 +29,8 @@ public final class SessionManager: ObservableObject {
     private var currentParser: AnnexBParser?
     private var currentDecoder: VTDecoder?
     private var audioPlayer: AudioPlayer?
+    private var deviceTracker: ADBDeviceTracker?
+    private var trackingTask: Task<Void, Never>?
 
     public init() {}
 
@@ -51,18 +53,56 @@ public final class SessionManager: ObservableObject {
         return nil
     }
 
-    public func refreshDevices() async {
+    public func startDeviceTrackingIfNeeded() async {
+        guard trackingTask == nil else { return }
         do {
-            let list = try await ADBManager.shared.getDevices()
-            self.devices = list
-            if selectedDevice == nil || !list.contains(where: { $0.serial == selectedDevice?.serial }) {
-                self.selectedDevice = list.first(where: { $0.state == .device })
+            let endpoint = try ADBServerEndpoint.resolve()
+            let tracker = ADBDeviceTracker(endpoint: endpoint)
+            self.deviceTracker = tracker
+            let stream = await tracker.events()
+            await tracker.start()
+
+            trackingTask = Task { [weak self] in
+                for await event in stream {
+                    guard let self else { break }
+                    switch event {
+                    case .snapshot(_, let list, _):
+                        self.applyDeviceList(list)
+                    case .disconnected(_, let reason):
+                        self.statusMessage = "ADB 设备跟踪已断开: \(reason)"
+                    }
+                }
             }
+        } catch {
+            self.statusMessage = error.localizedDescription
+        }
+    }
+
+    public func refreshDevices() async {
+        await startDeviceTrackingIfNeeded()
+        do {
+            let list: [ADBDevice]
+            if let tracker = deviceTracker {
+                list = try await tracker.refreshOnce().devices
+            } else {
+                list = try await ADBManager.shared.getDevices()
+            }
+            applyDeviceList(list)
             self.statusMessage = "扫描完成: 发现 \(list.count) 台设备"
         } catch {
             self.statusMessage = "扫描设备失败: \(error.localizedDescription)"
         }
         await scanWirelessDevices()
+    }
+
+    private func applyDeviceList(_ list: [ADBDevice]) {
+        self.devices = list
+        if let current = selectedDevice,
+           let matched = list.first(where: { $0.selectionKey == current.selectionKey }) {
+            self.selectedDevice = matched
+        } else if selectedDevice == nil || !list.contains(where: { $0.selectionKey == selectedDevice?.selectionKey }) {
+            self.selectedDevice = list.first(where: { $0.state == .device })
+        }
     }
 
     public func scanWirelessDevices() async {

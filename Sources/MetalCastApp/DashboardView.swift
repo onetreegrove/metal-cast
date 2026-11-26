@@ -4,6 +4,7 @@ import MetalCastCore
 public struct DashboardView: View {
     @ObservedObject var session = SessionManager.shared
     @ObservedObject var keyMap = KeyMapManager.shared
+    @ObservedObject var fileCoordinator = FileManagerWindowCoordinator.shared
 
     @State private var showingWifiDialog = false
     @State private var wifiIpInput = "192.168.1."
@@ -38,7 +39,7 @@ public struct DashboardView: View {
                 .padding(.horizontal, 14)
                 .padding(.top, 14)
 
-                List(session.devices, id: \.serial, selection: $session.selectedDevice) { device in
+                List(session.devices, id: \.selectionKey, selection: $session.selectedDevice) { device in
                     HStack(spacing: 10) {
                         Image(systemName: device.isWifi ? "wifi" : "iphone")
                             .font(.system(size: 15))
@@ -196,8 +197,26 @@ public struct DashboardView: View {
                             Text("状态: \(device.state.rawValue) · 模式: \(device.isWifi ? "Wi-Fi 无线" : "USB 有线") · 序列号: \(device.serial)")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
+                            if device.state == .device && device.transportId == nil {
+                                Text("当前连接缺少 transport_id，请升级或重新初始化 ADB 连接后打开手机文件")
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                            }
                         }
                         Spacer()
+
+                        Button(action: {
+                            fileCoordinator.openOrFocus(device: device)
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "folder")
+                                Text(fileCoordinator.isWindowOpen(for: device) ? "置前文件窗口" : "手机文件")
+                            }
+                            .font(.system(size: 12, weight: .medium))
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(device.state != .device || device.transportId == nil)
+                        .help("打开独立手机文件管理窗口（不依赖投屏状态）")
 
                         // One-click switch USB to wireless if USB connected
                         if !device.isWifi {

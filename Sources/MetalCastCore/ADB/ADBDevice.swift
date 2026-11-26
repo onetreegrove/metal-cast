@@ -7,7 +7,11 @@ public struct ADBDevice: Identifiable, Sendable, Equatable, Hashable {
     public let product: String?
     public let transportId: String?
 
-    public var id: String { serial }
+    public var selectionKey: String {
+        transportId.map { "tid:\($0)" } ?? "serial:\(serial)"
+    }
+
+    public var id: String { selectionKey }
 
     public var isWifi: Bool {
         serial.contains(":") || serial.contains(".")
