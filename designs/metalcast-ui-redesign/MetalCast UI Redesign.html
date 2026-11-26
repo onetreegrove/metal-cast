@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-style="native-pro">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    try {
+      document.querySelector('meta[name="color-scheme"]').content =
+        localStorage.getItem("color-scheme") ?? "light dark";
+    } catch (e) {}
+  </script>
+  <title>MetalCast — 整体 UI 重设计方案预览</title>
+  <link rel="stylesheet" href="styles.css?v=3">
+</head>
+<body>
+  <header class="studio-bar" data-screen-label="studio-bar">
+    <div class="studio-brand">
+      <div class="studio-mark" aria-hidden="true">MC</div>
+      <div class="studio-title-wrap">
+        <div class="studio-title">MetalCast 整体 UI 重设计提案</div>
+        <div class="studio-subtitle">3 套视觉方向 · 全窗口可交互原型 · 待确认后重构 SwiftUI / AppKit</div>
+      </div>
+    </div>
+
+    <div class="studio-controls">
+      <div class="studio-group">
+        <span class="studio-label">界面</span>
+        <div class="tablist" focusgroup="tablist nomemory" aria-label="设计预览窗口切换" id="studio-view-tabs">
+          <button type="button" id="view-tab-dashboard" aria-selected="true" focusgroupstart>控制中心</button>
+          <button type="button" id="view-tab-files">手机文件管理</button>
+          <button type="button" id="view-tab-mirror">投屏工具栏</button>
+          <button type="button" id="view-tab-tokens">设计规范</button>
+        </div>
+      </div>
+
+      <div class="studio-group">
+        <span class="studio-label">风格</span>
+        <div class="pill-segment" role="group" aria-label="视觉风格切换" id="style-switcher">
+          <button type="button" data-style-btn="native-pro" aria-pressed="true">原生精密</button>
+          <button type="button" data-style-btn="studio-hardware" aria-pressed="false">硬件控制台</button>
+          <button type="button" data-style-btn="minimal-air" aria-pressed="false">极简清透</button>
+        </div>
+      </div>
+
+      <div class="studio-group">
+        <span class="studio-label">明暗</span>
+        <div class="pill-segment" role="group" aria-label="主题色彩模式" id="theme-switcher">
+          <button type="button" data-theme-btn="system" aria-pressed="true" id="theme-system-btn">跟随系统</button>
+          <button type="button" data-theme-btn="light" aria-pressed="false">浅色</button>
+          <button type="button" data-theme-btn="dark" aria-pressed="false">深色</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="stage">
+    <section class="style-brief" aria-label="当前风格说明">
+      <div class="style-brief-text">
+        <span class="style-brief-badge" id="brief-name">方案 A · 原生精密</span>
+        <span class="style-brief-desc" id="brief-desc">克制 macOS 毛玻璃层级 + 清晰的设备头与分标签设置，零表单墙，兼顾日常与专业感。</span>
+      </div>
+      <div class="style-brief-actions">
+        <button type="button" class="btn btn-primary btn-sm" id="btn-preview-wireless">
+          <span class="icon icon-sm" data-icon="wifi"></span>
+          <span>预览无线连接弹窗</span>
+        </button>
+        <button type="button" class="btn btn-sm" id="btn-jump-files">
+          <span class="icon icon-sm" data-icon="folder"></span>
+          <span>直达文件管理窗口</span>
+        </button>
+        <button type="button" class="btn btn-sm" id="btn-jump-mirror">
+          <span class="icon icon-sm" data-icon="dockPos"></span>
+          <span>查看投屏 Dock 效果</span>
+        </button>
+      </div>
+    </section>
+
+    <div class="tab-panels-stack">
+    <!-- =====================================================
+         View 1: Control Center (DashboardView Redesign)
+         ===================================================== -->
+    <section class="screen-panel" id="panel-dashboard" role="tabpanel" aria-labelledby="view-tab-dashboard" data-screen-label="dashboard" tabindex="0">
+      <div class="mac-window">
+        <div class="window-titlebar">
+          <div class="traffic-lights" aria-hidden="true">
+            <span class="tl-dot tl-close"></span>
+            <span class="tl-dot tl-min"></span>
+            <span class="tl-dot tl-zoom"></span>
+          </div>
+          <div class="window-title">MetalCast 控制中心</div>
+          <div class="window-titlebar-right">
+            <span class="status-chip" id="cc-run-chip">
+              <span class="status-dot"></span>
+              <span id="cc-run-label">待机</span>
+            </span>
+          </div>
+        </div>
+
+        <div class="cc-body">
+          <aside class="cc-sidebar" aria-label="已连接设备与无线入口">
+            <div class="sidebar-section">
+              <div class="sidebar-head">
+                <span class="sidebar-label">已连接设备</span>
+                <div class="sidebar-head-actions">
+                  <button type="button" class="btn btn-ghost btn-icon" id="cc-add-wireless-btn" title="无线发现与 IP 连接" aria-label="无线发现与 IP 连接">
+                    <span class="icon icon-sm" data-icon="plus"></span>
+                  </button>
+                  <button type="button" class="btn btn-ghost btn-icon" id="cc-refresh-btn" title="刷新设备列表" aria-label="刷新设备列表">
+                    <span class="icon icon-sm" data-icon="refresh"></span>
+                  </button>
+                </div>
+              </div>
+              <div class="device-list" id="cc-device-list"></div>
+            </div>
+
+            <div class="sidebar-footer">
+              <button type="button" class="wireless-trigger" id="cc-open-wireless-btn">
+                <span class="wireless-trigger-left">
+                  <span class="icon icon-sm" data-icon="wifi"></span>
+                  <span>无线连接与发现</span>
+                </span>
+                <span class="wireless-trigger-right">
+                  <span class="nearby-pill" id="cc-mdns-pill">
+                    <span class="mdns-dot" id="cc-mdns-dot" aria-hidden="true"></span>
+                    <span class="num" id="cc-mdns-count">2 附近</span>
+                  </span>
+                  <span class="icon icon-sm wireless-trigger-chevron" data-icon="chevronRight" aria-hidden="true"></span>
+                </span>
+              </button>
+            </div>
+          </aside>
+
+          <div class="cc-main">
+            <div class="device-hero">
+              <div class="hero-identity">
+                <div class="hero-title-line">
+                  <h1 class="hero-name" id="hero-model">Pixel 9 Pro</h1>
+                  <div class="hero-badges" id="hero-badges"></div>
+                </div>
+                <div class="hero-badges">
+                  <span class="meta-tag mono num" id="hero-serial">41281FDAP0019X</span>
+                  <span class="meta-tag mono num" id="hero-resolution">1280 × 2856</span>
+                  <span class="meta-tag" id="hero-os">Android 15</span>
+                </div>
+                <div class="hero-warning" id="hero-warning" hidden></div>
+              </div>
+
+              <div class="hero-actions">
+                <button type="button" class="btn" id="hero-files-btn">
+                  <span class="icon" data-icon="folder"></span>
+                  <span>手机文件</span>
+                </button>
+                <button type="button" class="btn" id="hero-wifi-switch-btn">
+                  <span class="icon" data-icon="bolt"></span>
+                  <span>一键切无线</span>
+                </button>
+                <button type="button" class="btn btn-primary" id="hero-mirror-btn">
+                  <span class="icon" data-icon="play" id="hero-mirror-icon"></span>
+                  <span id="hero-mirror-label">开启原生投屏</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="signal-strip" aria-label="当前推流链路摘要">
+              <div class="signal-metrics" id="signal-summary">
+                <span class="signal-item">分辨率 <strong id="sig-res">原生原画</strong></span>
+                <span class="signal-item">帧率 <strong id="sig-fps">自适应</strong></span>
+                <span class="signal-item">码率 <strong id="sig-rate">16 Mbps</strong></span>
+                <span class="signal-item">编码 <strong id="sig-codec">H.264</strong></span>
+                <span class="signal-item">音频 <strong id="sig-audio">Mac 转发</strong></span>
+                <span class="signal-item">映射 <strong id="sig-keymap">和平精英</strong></span>
+              </div>
+              <span class="signal-label mono">VideoToolbox · Metal NV12 (0-Copy)</span>
+            </div>
+
+            <div class="workspace-tabs">
+              <div class="tablist" focusgroup="tablist nomemory" aria-label="控制中心配置分区" id="cc-workspace-tabs">
+                <button type="button" id="cc-tab-stream" aria-selected="true" focusgroupstart>投屏与画质</button>
+                <button type="button" id="cc-tab-keymap">键鼠映射</button>
+                <button type="button" id="cc-tab-capabilities">系统能力与快捷</button>
+              </div>
+
+              <div class="tab-panels-stack">
+              <div class="tab-panel" id="cc-panel-stream" role="tabpanel" aria-labelledby="cc-tab-stream">
+                <div class="tab-panel-inner">
+                  <div class="preset-grid">
+                    <div class="setting-card">
+                      <div class="setting-card-head">
+                        <span class="setting-card-title">画面与编码参数</span>
+                        <span class="setting-card-note">即时写入下一次会话</span>
+                      </div>
+
+                      <div class="control-row">
+                        <span class="control-row-label">目标分辨率限制</span>
+                        <div class="segmented" role="group" aria-label="目标分辨率" data-setting="res">
+                          <button type="button" data-val="原生原画" aria-pressed="true">原生原画</button>
+                          <button type="button" data-val="1080P" aria-pressed="false">1080P</button>
+                          <button type="button" data-val="720P" aria-pressed="false">720P</button>
+                        </div>
+                      </div>
+
+                      <div class="control-row">
+                        <span class="control-row-label">最大帧率上限</span>
+                        <div class="segmented" role="group" aria-label="最大帧率" data-setting="fps">
+                          <button type="button" data-val="自适应" aria-pressed="true">自适应</button>
+                          <button type="button" data-val="60 fps" aria-pressed="false">60 fps</button>
+                          <button type="button" data-val="120 fps" aria-pressed="false">120 fps</button>
+                        </div>
+                      </div>
+
+                      <div class="control-row">
+                        <span class="control-row-label">视频比特率</span>
+                        <div class="segmented" role="group" aria-label="视频比特率" data-setting="rate">
+                          <button type="button" data-val="8 Mbps" aria-pressed="false">8 Mbps</button>
+                          <button type="button" data-val="16 Mbps" aria-pressed="true">16 Mbps</button>
+                          <button type="button" data-val="32 Mbps" aria-pressed="false">32 Mbps</button>
+                        </div>
+                      </div>
+
+                      <div class="control-row">
+                        <span class="control-row-label">硬件视频编码</span>
+                        <div class="segmented" role="group" aria-label="硬件视频编码" data-setting="codec">
+                          <button type="button" data-val="H.264" aria-pressed="true">H.264（兼容性高）</button>
+                          <button type="button" data-val="H.265 / HEVC" aria-pressed="false">H.265（省 50% 带宽）</button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="right-card-stack">
+                      <div class="setting-card">
+                        <div class="setting-card-head">
+                          <span class="setting-card-title">音频与设备行为</span>
+                          <span class="setting-card-note">投屏连接后自动应用</span>
+                        </div>
+
+                        <div class="toggle-list">
+                          <label class="toggle-row">
+                            <span class="toggle-copy">
+                              <span class="toggle-title">低延迟音频转发</span>
+                              <span class="toggle-desc">将手机媒体与游戏音频通过 Mac 扬声器或耳机播放</span>
+                            </span>
+                            <input type="checkbox" class="switch" id="toggle-audio" checked>
+                          </label>
+
+                          <label class="toggle-row">
+                            <span class="toggle-copy">
+                              <span class="toggle-title">启动后自动熄灭手机屏幕</span>
+                              <span class="toggle-desc">保持电脑端持续渲染与触控操作，显著降低手机发热</span>
+                            </span>
+                            <input type="checkbox" class="switch" id="toggle-screenoff">
+                          </label>
+                        </div>
+                      </div>
+
+                      <div class="setting-card">
+                        <div class="setting-card-head">
+                          <span class="setting-card-title">快捷操作与拖放</span>
+                          <span class="setting-card-note">投屏窗口常用热键</span>
+                        </div>
+                        <div class="shortcut-mini-grid">
+                          <div class="shortcut-mini-item">
+                            <span>收起 / 唤出工具栏</span>
+                            <span><kbd>Cmd</kbd>+<kbd>T</kbd></span>
+                          </div>
+                          <div class="shortcut-mini-item">
+                            <span>原画截图至桌面</span>
+                            <span><kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></span>
+                          </div>
+                          <div class="shortcut-mini-item">
+                            <span>键鼠视角锁定</span>
+                            <span><kbd>~</kbd></span>
+                          </div>
+                          <div class="shortcut-mini-item">
+                            <span>拖拽 APK / 普通文件</span>
+                            <span class="shortcut-hint">静默安装或推送至 Download</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="tab-panel" id="cc-panel-keymap" role="tabpanel" aria-labelledby="cc-tab-keymap" hidden="until-found">
+                <div class="tab-panel-inner">
+                  <div class="setting-card">
+                    <div class="setting-card-head">
+                      <span class="setting-card-title">选择游戏 / 应用映射预设</span>
+                      <button type="button" class="btn btn-sm" id="cc-open-keymap-dir">
+                        <span class="icon icon-sm" data-icon="folder"></span>
+                        <span>打开配置目录 JSON</span>
+                      </button>
+                    </div>
+                    <div class="keymap-grid" id="cc-keymap-grid"></div>
+                  </div>
+                  <div class="kbd-strip">
+                    <span><kbd>~</kbd> 锁定 / 释放 3D 视角</span>
+                    <span><kbd>WASD</kbd> 虚拟摇杆走位</span>
+                    <span><kbd>M</kbd> / <kbd>Tab</kbd> 地图与背包自动释放鼠标</span>
+                    <span><kbd>Cmd</kbd> + <kbd>T</kbd> 隐藏或唤出工具栏</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="tab-panel" id="cc-panel-capabilities" role="tabpanel" aria-labelledby="cc-tab-capabilities" hidden="until-found">
+                <div class="tab-panel-inner">
+                  <div class="capability-grid">
+                    <div class="capability-card">
+                      <div class="capability-title">macOS 原生输入法直通</div>
+                      <div class="capability-desc">支持拼音候选词与全键盘按键透传，在投屏窗口直接用 Mac 输入法与手机聊微信或写文档。</div>
+                    </div>
+                    <div class="capability-card">
+                      <div class="capability-title">双向剪贴板无感同步</div>
+                      <div class="capability-desc">Mac 复制文本、验证码或链接后自动同步至手机剪贴板，手机端复制同样即时回传。</div>
+                    </div>
+                    <div class="capability-card">
+                      <div class="capability-title">拖拽安装 APK 与快捷推流</div>
+                      <div class="capability-desc">将本地 APK 拖入投屏画面自动静默安装；拖入普通文件则快速推送至手机 Download 目录。</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <footer class="window-footer">
+          <div class="footer-left">
+            <span class="status-dot" style="color: var(--success);" id="cc-footer-dot"></span>
+            <span class="footer-status-text" id="cc-footer-status">就绪 · ADB 跟踪运行中（server_gen #3）</span>
+          </div>
+          <div class="footer-right mono">
+            <span id="cc-footer-caps">shell_v2 · stat_v2 · ls_v2 · mv -nT</span>
+          </div>
+        </footer>
+      </div>
+    </section>
+
+    <!-- =====================================================
+         View 2: File Manager (FileManagerView Redesign)
+         ===================================================== -->
+    <section class="screen-panel" id="panel-files" role="tabpanel" aria-labelledby="view-tab-files" data-screen-label="file-manager" hidden="until-found">
+      <div class="mac-window">
+        <div class="window-titlebar">
+          <div class="traffic-lights" aria-hidden="true">
+            <span class="tl-dot tl-close"></span>
+            <span class="tl-dot tl-min"></span>
+            <span class="tl-dot tl-zoom"></span>
+          </div>
+          <div class="window-title">手机文件 — Pixel 9 Pro</div>
+          <div class="window-titlebar-right">
+            <span class="status-chip live">
+              <span class="status-dot"></span>
+              <span>已绑定 Session #4</span>
+            </span>
+          </div>
+        </div>
+
+        <div class="fm-toolbar">
+          <div class="fm-toolbar-left">
+            <button type="button" class="btn btn-icon" id="fm-back-btn" title="返回上一级" aria-label="返回上一级">
+              <span class="icon icon-sm" data-icon="back"></span>
+            </button>
+            <button type="button" class="btn btn-icon" id="fm-refresh-btn" title="刷新当前目录" aria-label="刷新当前目录">
+              <span class="icon icon-sm" data-icon="refresh"></span>
+            </button>
+            <nav class="breadcrumb-pill" aria-label="当前手机目录路径" id="fm-breadcrumb"></nav>
+          </div>
+
+          <div class="fm-toolbar-actions">
+            <button type="button" class="btn btn-primary btn-sm" id="fm-upload-btn">
+              <span class="icon icon-sm" data-icon="upload"></span>
+              <span>上传文件</span>
+            </button>
+            <button type="button" class="btn btn-sm" id="fm-download-btn" disabled>
+              <span class="icon icon-sm" data-icon="download"></span>
+              <span>下载所选</span>
+            </button>
+            <button type="button" class="btn btn-danger-outline btn-sm" id="fm-delete-btn" disabled>
+              <span class="icon icon-sm" data-icon="trash"></span>
+              <span>删除所选</span>
+            </button>
+            <button type="button" class="btn btn-sm" id="fm-drawer-toggle-btn" aria-expanded="true">
+              <span class="icon icon-sm" data-icon="tray"></span>
+              <span>任务与账本</span>
+              <span class="badge-count num" id="fm-attention-badge">4</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="fm-banner" id="fm-banner" hidden>
+          <span id="fm-banner-text"></span>
+          <button type="button" class="btn btn-ghost btn-sm" id="fm-banner-close">关闭</button>
+        </div>
+
+        <div class="fm-main">
+          <div class="fm-table-region" role="region" aria-labelledby="fm-table-caption" tabindex="0">
+            <div id="fm-sort-status" role="status" class="sr-only"></div>
+            <table class="fm-table" id="fm-table">
+              <caption id="fm-table-caption" class="sr-only">手机共享存储当前目录文件列表</caption>
+              <colgroup>
+                <col class="col-name">
+                <col class="col-kind">
+                <col class="col-size">
+                <col class="col-mtime">
+              </colgroup>
+              <thead>
+                <tr>
+                  <th scope="col" data-col="name" data-type="text" aria-sort="ascending">
+                    <button type="button" commandfor="fm-table" command="--sort">
+                      <span>名称</span>
+                      <span class="icon icon-sm sort-chevron" data-icon="sortAsc" aria-hidden="true"></span>
+                    </button>
+                  </th>
+                  <th scope="col" data-col="kind" data-type="text">
+                    <button type="button" commandfor="fm-table" command="--sort">
+                      <span>类型</span>
+                      <span class="icon icon-sm sort-chevron" data-icon="sortAsc" aria-hidden="true"></span>
+                    </button>
+                  </th>
+                  <th scope="col" class="col-size" data-col="size" data-type="number">
+                    <button type="button" commandfor="fm-table" command="--sort">
+                      <span class="icon icon-sm sort-chevron" data-icon="sortAsc" aria-hidden="true"></span>
+                      <span>大小</span>
+                    </button>
+                  </th>
+                  <th scope="col" class="col-mtime" data-col="mtime" data-type="number">
+                    <button type="button" commandfor="fm-table" command="--sort">
+                      <span class="icon icon-sm sort-chevron" data-icon="sortAsc" aria-hidden="true"></span>
+                      <span>修改时间</span>
+                    </button>
+                  </th>
+                </tr>
+              </thead>
+              <tbody id="fm-tbody"></tbody>
+            </table>
+          </div>
+
+          <section class="fm-drawer" id="fm-drawer" aria-label="任务队列与清理账本">
+            <div class="drawer-header">
+              <div class="tablist" focusgroup="tablist nomemory" aria-label="抽屉标签" id="fm-drawer-tabs">
+                <button type="button" id="drawer-tab-tasks" aria-selected="true" focusgroupstart>任务队列 (<span id="drawer-tasks-count">3</span>)</button>
+                <button type="button" id="drawer-tab-ledger">清理账本 (<span id="drawer-ledger-count">2</span>)</button>
+              </div>
+              <div class="drawer-meta">
+                <span class="mono num">全局传输槽 1/2</span>
+                <button type="button" class="btn btn-ghost btn-sm" id="fm-clear-finished">清除已完成</button>
+              </div>
+            </div>
+
+            <div class="tab-panels-stack">
+            <div class="tab-panel" id="drawer-panel-tasks" role="tabpanel" aria-labelledby="drawer-tab-tasks">
+              <div class="tab-panel-inner" style="padding: 0;">
+                <div class="drawer-body" id="fm-tasks-body"></div>
+              </div>
+            </div>
+
+            <div class="tab-panel" id="drawer-panel-ledger" role="tabpanel" aria-labelledby="drawer-tab-ledger" hidden="until-found">
+              <div class="tab-panel-inner" style="padding: 0;">
+                <div class="drawer-body" id="fm-ledger-body"></div>
+              </div>
+            </div>
+            </div>
+          </section>
+        </div>
+
+        <footer class="window-footer">
+          <div class="footer-left">
+            <span class="mono num" id="fm-footer-stats">USB · 物理根: /storage/emulated/0 · 共 6 项 · 已选 0 项</span>
+          </div>
+          <div class="footer-right mono">
+            <span>shell_v2 · stat_v2 · ls_v2 · mv -nT</span>
+          </div>
+        </footer>
+      </div>
+    </section>
+
+    <!-- =====================================================
+         View 3: Mirror Window & Dock Toolbar Redesign
+         ===================================================== -->
+    <section class="screen-panel" id="panel-mirror" role="tabpanel" aria-labelledby="view-tab-mirror" data-screen-label="mirror-window" hidden="until-found">
+      <div class="mirror-layout">
+        <div class="mirror-stage-card">
+          <div class="mirror-stage-head">
+            <div>
+              <div class="setting-card-title">投屏窗口与停靠工具栏（DockToolbarView）</div>
+              <div class="setting-card-note">支持右侧/底部切换、激活色态点亮、与视频面物理隔离不遮挡触控</div>
+            </div>
+            <div class="pill-segment" role="group" aria-label="工具栏停靠位置">
+              <button type="button" id="mirror-dock-right-btn" aria-pressed="true">右侧停靠</button>
+              <button type="button" id="mirror-dock-bottom-btn" aria-pressed="false">底部停靠</button>
+            </div>
+          </div>
+
+          <div class="mirror-window-frame" id="mirror-window-frame" data-dock="right" data-dock-hidden="false" data-screen-off="false">
+            <div class="mirror-surface">
+              <div class="phone-status">
+                <span class="mono">17:08</span>
+                <span>5G · 92%</span>
+              </div>
+
+              <div>
+                <div class="phone-hud-pill" id="mirror-hud-pill" hidden>键鼠映射已激活 · 按 ~ 释放视角</div>
+                <div class="phone-clock">
+                  <div class="phone-time mono">17:08</div>
+                  <div class="phone-date">11月26日 星期四 · Pixel 9 Pro</div>
+                </div>
+              </div>
+
+              <div class="phone-widgets">
+                <div class="phone-widget">
+                  <span class="phone-widget-k">渲染管线</span>
+                  <span class="phone-widget-v mono">Metal NV12</span>
+                </div>
+                <div class="phone-widget">
+                  <span class="phone-widget-k">传输时延</span>
+                  <span class="phone-widget-v mono">6.4 ms · 120Hz</span>
+                </div>
+              </div>
+
+              <div class="mirror-surface-overlay">
+                <span class="icon" data-icon="moon"></span>
+                <div style="font-weight: 600; font-size: 13px;">手机物理屏幕已熄灭</div>
+                <div style="font-size: 11px; color: rgba(243,245,249,0.7);">省电降温运行中，Mac 端可继续正常操作或点击月亮点亮</div>
+              </div>
+
+              <button type="button" class="mirror-restore-hint" id="mirror-restore-btn" hidden>工具栏已收起 · 点击恢复 (Cmd+T)</button>
+            </div>
+
+            <nav class="dock-toolbar" aria-label="投屏快捷控制栏" id="mirror-dock-toolbar">
+              <button type="button" class="dock-btn" data-dock-action="返回 (Cmd+B)" title="返回 (Cmd+B)" aria-label="返回"><span class="icon icon-sm" data-icon="back"></span></button>
+              <button type="button" class="dock-btn" data-dock-action="回到主屏幕 (Cmd+H)" title="主屏幕 (Cmd+H)" aria-label="主屏幕"><span class="icon icon-sm" data-icon="home"></span></button>
+              <button type="button" class="dock-btn" data-dock-action="多任务后台 (Cmd+S)" title="多任务后台 (Cmd+S)" aria-label="多任务"><span class="icon icon-sm" data-icon="recents"></span></button>
+              <span class="dock-sep" aria-hidden="true"></span>
+              <button type="button" class="dock-btn active-green" id="dock-game-btn" aria-pressed="false" title="游戏键鼠映射 (~)" aria-label="游戏键鼠映射"><span class="icon icon-sm" data-icon="gamepad"></span></button>
+              <button type="button" class="dock-btn active-amber" id="dock-screen-btn" aria-pressed="false" title="熄灭/点亮手机物理屏幕" aria-label="熄灭手机屏幕"><span class="icon icon-sm" data-icon="moon"></span></button>
+              <button type="button" class="dock-btn" data-dock-action="原画无损截图已保存至桌面并写入剪贴板" title="无损截图 (Cmd+Shift+S)" aria-label="无损截图"><span class="icon icon-sm" data-icon="camera"></span></button>
+              <button type="button" class="dock-btn" data-dock-action="音量 +" title="音量 +" aria-label="音量加"><span class="icon icon-sm" data-icon="volUp"></span></button>
+              <button type="button" class="dock-btn" data-dock-action="音量 -" title="音量 -" aria-label="音量减"><span class="icon icon-sm" data-icon="volDown"></span></button>
+              <button type="button" class="dock-btn active-danger" id="dock-mute-btn" aria-pressed="false" title="静音切换" aria-label="静音"><span class="icon icon-sm" data-icon="mute"></span></button>
+              <button type="button" class="dock-btn" data-dock-action="已发送电源/锁屏键" title="电源 / 锁屏" aria-label="电源键"><span class="icon icon-sm" data-icon="power"></span></button>
+              <span class="dock-sep" aria-hidden="true"></span>
+              <button type="button" class="dock-btn" data-dock-action="切换全屏显示" title="全屏模式" aria-label="全屏"><span class="icon icon-sm" data-icon="fullscreen"></span></button>
+              <button type="button" class="dock-btn" id="dock-pos-btn" title="切换右侧 / 底部停靠" aria-label="切换停靠位置"><span class="icon icon-sm" data-icon="dockPos"></span></button>
+              <button type="button" class="dock-btn" id="dock-hide-btn" title="收起工具栏 (Cmd+T)" aria-label="收起工具栏"><span class="icon icon-sm" data-icon="chevronRight"></span></button>
+            </nav>
+          </div>
+        </div>
+
+        <aside class="mirror-inspector">
+          <div class="setting-card-head">
+            <span class="setting-card-title">工具栏与窗口改进重点</span>
+            <span class="meta-tag ok" id="mirror-feedback-pill">实时响应中</span>
+          </div>
+          <div class="spec-list">
+            <div class="spec-item">
+              <span class="spec-item-k">按钮激活态可视化</span>
+              <span class="spec-item-v">键鼠映射（绿）、物理熄屏（琥珀）、音频静音（红）采用弱色底胶囊 + 细边框反馈，一眼辨识开关状态。</span>
+            </div>
+            <div class="spec-item">
+              <span class="spec-item-k">1px 发丝线与等距分组</span>
+              <span class="spec-item-v">严格分为「系统导航」「画面/音视频控制」「窗口排布」三组，切换右侧 / 底部停靠时分隔线方向自动旋转。</span>
+            </div>
+            <div class="spec-item">
+              <span class="spec-item-k">最近触发操作回显</span>
+              <span class="spec-item-v mono" id="mirror-action-log">等待点击右侧工具栏图标测试交互…</span>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- =====================================================
+         View 4: Design Tokens & SwiftUI / AppKit Mapping
+         ===================================================== -->
+    <section class="screen-panel" id="panel-tokens" role="tabpanel" aria-labelledby="view-tab-tokens" data-screen-label="design-tokens" hidden="until-found">
+      <div class="screen-stack-inner">
+      <div class="setting-card">
+        <div class="setting-card-head">
+          <div>
+            <div class="setting-card-title">实时 Design Tokens（随上方风格与浅/深色自动更新）</div>
+            <div class="setting-card-note" id="tokens-meta-line">当前激活：方案 A · 原生精密 · 14px 窗口 / 11px 卡片</div>
+          </div>
+        </div>
+        <div class="tokens-grid" id="tokens-swatch-grid"></div>
+      </div>
+
+      <div class="setting-card">
+        <div class="setting-card-head">
+          <span class="setting-card-title">SwiftUI / AppKit 落地改造映射清单</span>
+          <span class="setting-card-note">确认方案后将按此映射直接改造代码</span>
+        </div>
+        <div class="spec-list" id="swift-mapping-list"></div>
+      </div>
+      </div>
+    </section>
+    </div>
+  </main>
+
+  <!-- Native Modal <dialog> Elements -->
+  <dialog class="mc-dialog wide" id="dlg-wireless" closedby="any" aria-labelledby="dlg-wireless-title">
+    <div class="dlg-header">
+      <div class="dlg-header-top">
+        <span class="icon icon-sm" data-icon="wifi" style="color: var(--accent);"></span>
+        <h1 id="dlg-wireless-title">无线连接与局域网发现</h1>
+      </div>
+      <p class="dlg-subtitle">局域网 mDNS 自动发现配对与手动 IP 连接统一收口在此面板，避免占用主侧栏空间。</p>
+    </div>
+    <div class="dlg-body">
+      <section class="wireless-section" aria-label="局域网无线发现">
+        <div class="wireless-section-head">
+          <div>
+            <div class="setting-card-title">局域网无线发现（mDNS / Bonjour）</div>
+            <div class="setting-card-note">手机开启「开发者选项 → 无线调试」后自动显现</div>
+          </div>
+          <button type="button" class="btn btn-sm" id="dlg-mdns-rescan-btn" autofocus>
+            <span class="icon icon-sm" data-icon="refresh"></span>
+            <span>重新扫描</span>
+          </button>
+        </div>
+
+        <div class="mdns-list" id="dlg-mdns-list"></div>
+
+        <div class="pair-inline-box" id="dlg-pair-inline" hidden>
+          <div class="wireless-section-head">
+            <span class="spec-item-k" id="dlg-pair-inline-target">配对目标：—</span>
+            <button type="button" class="btn btn-ghost btn-sm" id="dlg-pair-inline-cancel">取消配对</button>
+          </div>
+          <div class="inline-ip-row">
+            <div class="field" style="flex: 1;">
+              <label for="pair-code-input">6 位无线配对码</label>
+              <input id="pair-code-input" class="mono" type="text" inputmode="numeric" maxlength="6" placeholder="输入手机显示的 6 位配对码">
+            </div>
+            <button type="button" class="btn btn-primary" id="dlg-pair-submit-btn">立即配对</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="wireless-section" aria-label="手动输入 IP 连接">
+        <div class="wireless-section-head">
+          <div>
+            <div class="setting-card-title">手动输入 IP 连接</div>
+            <div class="setting-card-note">适用于已知 IP 的 tcpip 5555 或固定端口设备</div>
+          </div>
+        </div>
+        <div class="inline-ip-row">
+          <div class="field" style="flex: 2;">
+            <label for="wifi-ip">IP 地址</label>
+            <input id="wifi-ip" class="mono" type="text" value="192.168.1.50">
+          </div>
+          <div class="field" style="flex: 1;">
+            <label for="wifi-port">端口</label>
+            <input id="wifi-port" class="mono" type="number" min="1" max="65535" value="5555">
+          </div>
+          <button type="button" class="btn btn-primary" id="dlg-wifi-connect-btn">连接</button>
+        </div>
+      </section>
+    </div>
+    <form method="dialog">
+      <div class="dlg-footer">
+        <button type="submit" class="btn" value="close">完成</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="mc-dialog wide" id="dlg-conflict" closedby="any" aria-labelledby="dlg-conflict-title">
+    <div class="dlg-header">
+      <h1 id="dlg-conflict-title">发现 2 个同名上传冲突</h1>
+      <p class="dlg-subtitle" id="dlg-conflict-dest">目标目录: /storage/emulated/0/Download（严格大小写不敏感查重）</p>
+    </div>
+    <form method="dialog">
+      <div class="dlg-body">
+        <div id="dlg-conflict-rows" style="display: flex; flex-direction: column; gap: 8px;"></div>
+      </div>
+      <div class="dlg-footer">
+        <button type="submit" class="btn" value="cancel">取消</button>
+        <button type="submit" class="btn" value="skip">全部跳过</button>
+        <button type="submit" class="btn btn-primary" value="keepBoth" autofocus>保留两份并重命名</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="mc-dialog" id="dlg-delete" aria-labelledby="dlg-delete-title">
+    <div class="dlg-header">
+      <h1 id="dlg-delete-title">确认永久删除手机文件？</h1>
+      <p class="dlg-subtitle" style="color: var(--danger);">此操作执行非递归普通文件删除，不经过回收站，无法恢复。</p>
+    </div>
+    <form method="dialog">
+      <div class="dlg-body">
+        <div class="spec-item">
+          <span class="spec-item-k" id="dlg-delete-meta">目标设备：Pixel 9 Pro</span>
+          <span class="spec-item-v mono" id="dlg-delete-list"></span>
+        </div>
+      </div>
+      <div class="dlg-footer">
+        <button type="submit" class="btn" value="cancel" autofocus>取消</button>
+        <button type="submit" class="btn btn-danger" value="confirm">永久删除</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="icons.js?v=3"></script>
+  <script src="data.js?v=3"></script>
+  <script src="app.js?v=3"></script>
+</body>
+</html>

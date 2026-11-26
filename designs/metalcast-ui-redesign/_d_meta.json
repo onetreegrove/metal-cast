@@ -1,0 +1,18 @@
+{
+  "type": "design",
+  "designSystems": [],
+  "primaryDesignSystem": null,
+  "assets": {
+    "MetalCast UI Redesign": {
+      "versions": [
+        {
+          "path": "MetalCast UI Redesign.html",
+          "createdAt": "2026-11-26T09:47:58.717Z",
+          "status": "needs-review"
+        }
+      ]
+    }
+  },
+  "createdAt": "2026-11-26T09:47:58.725Z",
+  "updatedAt": "2026-11-26T10:04:11.995Z"
+}
