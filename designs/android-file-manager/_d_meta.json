@@ -1,0 +1,23 @@
+{
+  "type": "design",
+  "designSystems": [],
+  "primaryDesignSystem": null,
+  "assets": {
+    "MetalCast File Manager": {
+      "versions": [
+        {
+          "path": "MetalCast File Manager.html",
+          "createdAt": "2026-11-26T03:28:25.742Z",
+          "status": "needs-review",
+          "subtitle": "纯 Swift ADB Sync 首版全流程高保真交互原型",
+          "viewport": {
+            "width": 1440,
+            "height": 860
+          }
+        }
+      ]
+    }
+  },
+  "createdAt": "2026-11-26T03:28:25.747Z",
+  "updatedAt": "2026-11-26T03:28:25.747Z"
+}
