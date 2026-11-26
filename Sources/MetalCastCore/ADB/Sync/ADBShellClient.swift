@@ -261,8 +261,15 @@ public struct ADBShellClient: Sendable {
         p=$(pwd -P && echo x) || exit 20
         [ "$p" = \(escapedExpected) ] || exit 20
         mkdir -- \(escapedProbe) 2>/dev/null || exit 25
-        cd -P -- \(escapedProbe) 2>/dev/null || exit 25
-        : > a || exit 25
+        if ! cd -P -- \(escapedProbe) 2>/dev/null; then
+          rmdir -- \(escapedProbe) 2>/dev/null
+          exit 25
+        fi
+        if ! (: > a) 2>/dev/null; then
+          cd .. 2>/dev/null
+          rmdir -- \(escapedProbe) 2>/dev/null
+          exit 25
+        fi
         mode=3
         if mv -nT -- a b 2>/dev/null && [ -f b ] && [ ! -e a ]; then
           mode=0
@@ -275,7 +282,7 @@ public struct ADBShellClient: Sendable {
           [ -e b ] && rm -- b 2>/dev/null
           [ -e c ] && rm -- c 2>/dev/null
         fi
-        cd ..
+        cd .. 2>/dev/null
         rmdir -- \(escapedProbe) 2>/dev/null
         exit "$mode"
         """
@@ -539,17 +546,8 @@ public struct ADBShellClient: Sendable {
         connection: ADBSocketConnection,
         timeout: TimeInterval
     ) async throws -> (id: UInt8, length: Int)? {
-        let first: Data
-        do {
-            first = try await connection.readExact(1, timeout: timeout, stage: "shell_v2")
-        } catch let error as ADBFileError {
-            // Clean EOF occurs only when 0 bytes were left before the next 5-byte frame header.
-            if case .protocolError(let stage, let detail) = error,
-               stage == "shell_v2",
-               detail.contains("实际仅收到 0 字节") {
-                return nil
-            }
-            throw error
+        guard let first = try await connection.readExactOrEOF(1, timeout: timeout, stage: "shell_v2") else {
+            return nil
         }
 
         let rest = try await connection.readExact(4, timeout: timeout, stage: "shell_v2")

@@ -130,8 +130,17 @@ public final class ADBProcessRunner: @unchecked Sendable {
         private var continuation: CheckedContinuation<(exitCode: Int32, stdout: String, stderr: String), Error>?
         private var didFinish = false
         private var isCancelled = false
+        private var hasLaunched = false
+        private var pendingTerminate = false
         private var pipesCleaned = false
         private var timeoutTimer: DispatchSourceTimer?
+        private var readSources: [DispatchSourceRead] = []
+
+        var isFinished: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return didFinish || isCancelled
+        }
 
         func attach(
             continuation: CheckedContinuation<(exitCode: Int32, stdout: String, stderr: String), Error>
@@ -146,13 +155,45 @@ public final class ADBProcessRunner: @unchecked Sendable {
             return true
         }
 
+        func markLaunched() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            hasLaunched = true
+            return pendingTerminate || isCancelled || didFinish
+        }
+
+        func requestTerminate() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if hasLaunched {
+                return true
+            }
+            pendingTerminate = true
+            return false
+        }
+
         func setTimer(_ timer: DispatchSourceTimer) {
+            lock.lock()
+            if didFinish {
+                lock.unlock()
+                timer.cancel()
+                timer.resume()
+                return
+            }
+            self.timeoutTimer = timer
+            lock.unlock()
+            timer.resume()
+        }
+
+        func setReadSources(_ sources: [DispatchSourceRead]) {
             lock.lock()
             defer { lock.unlock() }
             if didFinish {
-                timer.cancel()
+                for s in sources where !s.isCancelled {
+                    s.cancel()
+                }
             } else {
-                self.timeoutTimer = timer
+                self.readSources = sources
             }
         }
 
@@ -181,12 +222,18 @@ public final class ADBProcessRunner: @unchecked Sendable {
             return cont
         }
 
-        func claimPipeCleanup() -> Bool {
+        func cancelReadSources() {
             lock.lock()
-            defer { lock.unlock() }
-            guard !pipesCleaned else { return false }
+            let shouldCancel = !pipesCleaned
             pipesCleaned = true
-            return true
+            let sources = readSources
+            readSources = []
+            lock.unlock()
+            if shouldCancel {
+                for s in sources where !s.isCancelled {
+                    s.cancel()
+                }
+            }
         }
     }
 
@@ -222,89 +269,111 @@ public final class ADBProcessRunner: @unchecked Sendable {
 
         let outHandle = outPipe.fileHandleForReading
         let errHandle = errPipe.fileHandleForReading
+        let ioQueue = DispatchQueue(label: "com.metalcast.adb.process.io")
         let state = RunState()
 
-        @Sendable func detachHandlersOnce() {
-            if state.claimPipeCleanup() {
-                outHandle.readabilityHandler = nil
-                errHandle.readabilityHandler = nil
+        Self.configureNonBlocking(outHandle)
+        Self.configureNonBlocking(errHandle)
+
+        let outSource = DispatchSource.makeReadSource(fileDescriptor: outHandle.fileDescriptor, queue: ioQueue)
+        let errSource = DispatchSource.makeReadSource(fileDescriptor: errHandle.fileDescriptor, queue: ioQueue)
+
+        outSource.setEventHandler {
+            let eof = Self.drainNonBlocking(outHandle, into: outBox)
+            if eof && !outSource.isCancelled {
+                outSource.cancel()
+            }
+        }
+        errSource.setEventHandler {
+            let eof = Self.drainNonBlocking(errHandle, into: errBox)
+            if eof && !errSource.isCancelled {
+                errSource.cancel()
+            }
+        }
+        // Keep Pipe objects alive until DispatchSource cancels so fd remains valid.
+        outSource.setCancelHandler { _ = outPipe }
+        errSource.setCancelHandler { _ = errPipe }
+
+        @Sendable func detachSourcesOnIOQueue() {
+            ioQueue.async {
+                state.cancelReadSources()
             }
         }
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 guard state.attach(continuation: continuation) else {
-                    detachHandlersOnce()
+                    if !outSource.isCancelled { outSource.cancel() }
+                    if !errSource.isCancelled { errSource.cancel() }
+                    outSource.resume()
+                    errSource.resume()
                     continuation.resume(throwing: CancellationError())
                     return
                 }
 
-                outHandle.readabilityHandler = { handle in
-                    let chunk = handle.availableData
-                    if !chunk.isEmpty {
-                        outBox.append(chunk)
-                    } else {
-                        handle.readabilityHandler = nil
-                    }
-                }
-
-                errHandle.readabilityHandler = { handle in
-                    let chunk = handle.availableData
-                    if !chunk.isEmpty {
-                        errBox.append(chunk)
-                    } else {
-                        handle.readabilityHandler = nil
-                    }
-                }
+                state.setReadSources([outSource, errSource])
+                outSource.resume()
+                errSource.resume()
 
                 process.terminationHandler = { terminatedProcess in
-                    guard let cont = state.complete() else {
-                        detachHandlersOnce()
-                        return
-                    }
-                    detachHandlersOnce()
-                    Self.drainNonBlocking(outHandle, into: outBox)
-                    Self.drainNonBlocking(errHandle, into: errBox)
+                    ioQueue.async {
+                        _ = Self.drainNonBlocking(outHandle, into: outBox)
+                        _ = Self.drainNonBlocking(errHandle, into: errBox)
+                        state.cancelReadSources()
 
-                    let outStr = String(data: outBox.extract(), encoding: .utf8) ?? ""
-                    let errStr = String(data: errBox.extract(), encoding: .utf8) ?? ""
-                    let value = (terminatedProcess.terminationStatus, outStr, errStr)
-                    cont.resume(returning: value)
+                        guard let cont = state.complete() else { return }
+                        let outStr = String(decoding: outBox.extract(), as: UTF8.self)
+                        let errStr = String(decoding: errBox.extract(), as: UTF8.self)
+                        cont.resume(returning: (terminatedProcess.terminationStatus, outStr, errStr))
+                    }
                 }
 
-                if let timeout, timeout > 0 {
-                    let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
-                    timer.schedule(deadline: .now() + timeout)
-                    timer.setEventHandler {
-                        guard let cont = state.complete() else { return }
-                        if process.isRunning {
-                            process.terminate()
-                        }
-                        detachHandlersOnce()
-                        let formatted = String(format: "%.2g", timeout)
-                        cont.resume(throwing: ADBFileError.adbServerStartFailed("adb 命令执行超时（\(formatted) 秒）"))
-                    }
-                    state.setTimer(timer)
-                    timer.resume()
+                guard !state.isFinished else {
+                    detachSourcesOnIOQueue()
+                    return
                 }
 
                 do {
                     try process.run()
                 } catch {
-                    detachHandlersOnce()
+                    detachSourcesOnIOQueue()
                     if let cont = state.complete() {
                         cont.resume(throwing: error)
                     }
+                    return
+                }
+
+                if state.markLaunched() {
+                    if process.isRunning {
+                        process.terminate()
+                    }
+                    detachSourcesOnIOQueue()
+                    return
+                }
+
+                if let timeout, timeout > 0 {
+                    let timer = DispatchSource.makeTimerSource(queue: ioQueue)
+                    timer.schedule(deadline: .now() + timeout)
+                    timer.setEventHandler {
+                        guard let cont = state.complete() else { return }
+                        if state.requestTerminate(), process.isRunning {
+                            process.terminate()
+                        }
+                        state.cancelReadSources()
+                        let formatted = String(format: "%.2g", timeout)
+                        cont.resume(throwing: ADBFileError.adbServerStartFailed("adb 命令执行超时（\(formatted) 秒）"))
+                    }
+                    state.setTimer(timer)
                 }
             }
         } onCancel: {
             if let cont = state.markCancelled() {
-                if process.isRunning {
+                if state.requestTerminate(), process.isRunning {
                     process.terminate()
                 }
-                detachHandlersOnce()
+                detachSourcesOnIOQueue()
                 cont.resume(throwing: CancellationError())
-            } else if process.isRunning {
+            } else if state.requestTerminate(), process.isRunning {
                 process.terminate()
             }
         }
@@ -342,20 +411,36 @@ public final class ADBProcessRunner: @unchecked Sendable {
         return process
     }
 
-    private static func drainNonBlocking(_ handle: FileHandle, into box: BufferBox) {
+    private static func configureNonBlocking(_ handle: FileHandle) {
         let fd = handle.fileDescriptor
         guard fd >= 0 else { return }
         let flags = fcntl(fd, F_GETFL)
         if flags >= 0 {
             _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
         }
+    }
+
+    /// Reads all available bytes without blocking; returns `true` when EOF or fatal read error occurs.
+    @discardableResult
+    private static func drainNonBlocking(_ handle: FileHandle, into box: BufferBox) -> Bool {
+        let fd = handle.fileDescriptor
+        guard fd >= 0 else { return true }
         var buffer = [UInt8](repeating: 0, count: 4096)
         while true {
             let bytesRead = Darwin.read(fd, &buffer, buffer.count)
             if bytesRead > 0 {
                 box.append(Data(buffer[0..<bytesRead]))
+            } else if bytesRead == 0 {
+                return true
             } else {
-                break
+                let err = errno
+                if err == EINTR {
+                    continue
+                }
+                if err == EAGAIN || err == EWOULDBLOCK {
+                    return false
+                }
+                return true
             }
         }
     }

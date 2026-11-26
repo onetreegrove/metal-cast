@@ -60,6 +60,7 @@ public struct ADBFileSessionSnapshot: Sendable, Equatable {
     public let isWifi: Bool
     public let physicalRoot: String
     public let capabilities: ADBDeviceCapabilities
+    public let commitModeProbed: Bool
     public let initialComponents: [Data]
 
     public init(
@@ -68,6 +69,7 @@ public struct ADBFileSessionSnapshot: Sendable, Equatable {
         isWifi: Bool,
         physicalRoot: String,
         capabilities: ADBDeviceCapabilities,
+        commitModeProbed: Bool = true,
         initialComponents: [Data]
     ) {
         self.sessionId = sessionId
@@ -75,6 +77,7 @@ public struct ADBFileSessionSnapshot: Sendable, Equatable {
         self.isWifi = isWifi
         self.physicalRoot = physicalRoot
         self.capabilities = capabilities
+        self.commitModeProbed = commitModeProbed
         self.initialComponents = initialComponents
     }
 }
@@ -235,6 +238,7 @@ public enum ADBFileTaskKind: String, Sendable, Codable, Equatable {
 public struct ADBUploadPlanItem: Sendable, Equatable {
     public let localURL: URL
     public let targetFileName: String
+    public let originalBaseName: String
     public let conflictResolution: ADBTransferConflictResolution
     public let fileSize: UInt64
     public let mtime: Date?
@@ -242,12 +246,14 @@ public struct ADBUploadPlanItem: Sendable, Equatable {
     public init(
         localURL: URL,
         targetFileName: String,
+        originalBaseName: String? = nil,
         conflictResolution: ADBTransferConflictResolution = .keepBoth,
         fileSize: UInt64,
         mtime: Date? = nil
     ) {
         self.localURL = localURL
         self.targetFileName = targetFileName
+        self.originalBaseName = originalBaseName ?? targetFileName
         self.conflictResolution = conflictResolution
         self.fileSize = fileSize
         self.mtime = mtime
@@ -257,15 +263,18 @@ public struct ADBUploadPlanItem: Sendable, Equatable {
 public struct ADBDownloadPlanItem: Sendable, Equatable {
     public let remoteEntry: ADBRemoteEntry
     public let targetFileName: String
+    public let originalBaseName: String
     public let conflictResolution: ADBTransferConflictResolution
 
     public init(
         remoteEntry: ADBRemoteEntry,
         targetFileName: String,
+        originalBaseName: String? = nil,
         conflictResolution: ADBTransferConflictResolution = .keepBoth
     ) {
         self.remoteEntry = remoteEntry
         self.targetFileName = targetFileName
+        self.originalBaseName = originalBaseName ?? targetFileName
         self.conflictResolution = conflictResolution
     }
 }
@@ -322,6 +331,7 @@ public struct ADBFileTaskSnapshot: Identifiable, Sendable, Equatable {
     public let bytesPerSecond: Double
     public let state: ADBFileTaskState
     public let detail: String
+    public let directoryComponents: [Data]?
     public let localOutputURL: URL?
     public let ledgerEntryId: UUID?
     public let deleteResults: [ADBDeleteItemResult]?
@@ -337,6 +347,7 @@ public struct ADBFileTaskSnapshot: Identifiable, Sendable, Equatable {
         bytesPerSecond: Double,
         state: ADBFileTaskState,
         detail: String,
+        directoryComponents: [Data]? = nil,
         localOutputURL: URL? = nil,
         ledgerEntryId: UUID? = nil,
         deleteResults: [ADBDeleteItemResult]? = nil
@@ -351,9 +362,24 @@ public struct ADBFileTaskSnapshot: Identifiable, Sendable, Equatable {
         self.bytesPerSecond = bytesPerSecond
         self.state = state
         self.detail = detail
+        self.directoryComponents = directoryComponents
         self.localOutputURL = localOutputURL
         self.ledgerEntryId = ledgerEntryId
         self.deleteResults = deleteResults
+    }
+}
+
+public struct ADBPendingVerifyResult: Sendable, Equatable {
+    public let committed: Bool
+    public let tempDirCleaned: Bool
+    public let finalTargetName: String
+    public let taskSnapshot: ADBFileTaskSnapshot?
+
+    public init(committed: Bool, tempDirCleaned: Bool, finalTargetName: String, taskSnapshot: ADBFileTaskSnapshot?) {
+        self.committed = committed
+        self.tempDirCleaned = tempDirCleaned
+        self.finalTargetName = finalTargetName
+        self.taskSnapshot = taskSnapshot
     }
 }
 
@@ -361,6 +387,7 @@ public enum ADBFileTaskEvent: Sendable, Equatable {
     case taskUpdated(ADBFileTaskSnapshot)
     case activeTransferSlotCountChanged(Int)
     case ledgerUpdated([ADBLedgerEntry])
+    case sessionCapabilitiesUpdated(ADBFileSessionID, capabilities: ADBDeviceCapabilities, commitModeProbed: Bool)
     case sessionInvalidated(ADBFileSessionID, reason: String)
 }
 
@@ -382,7 +409,7 @@ public struct ADBLedgerEntry: Identifiable, Sendable, Codable, Equatable {
     public let targetParentPhysicalPath: String
     public let tempDirName: String
     public let tempPayloadName: String
-    public let finalTargetName: String
+    public var finalTargetName: String
     public var state: ADBLedgerEntryState
     public let createdAt: Date
     public var updatedAt: Date

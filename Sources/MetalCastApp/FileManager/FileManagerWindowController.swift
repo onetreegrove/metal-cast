@@ -60,6 +60,7 @@ public final class FileManagerWindowController: NSWindowController, NSWindowDele
     }
 
     public func windowWillClose(_ notification: Notification) {
+        viewModel.shutdown()
         onClosed(viewModel.bindingKey)
     }
 }

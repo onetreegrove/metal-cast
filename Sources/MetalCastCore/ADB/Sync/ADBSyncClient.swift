@@ -249,6 +249,23 @@ public struct ADBSyncClient: Sendable {
 
     /// Streams `localFileURL` over `SEND <remoteTempPath>,33188` in `<= 64 KiB` `DATA` chunks,
     /// concurrently listening for early `FAIL` responses, finishing with `DONE(mtime)` and 8B `OKAY(0)`.
+    private final class SendDoneState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var sendingDone = false
+
+        func markSendingDone() {
+            lock.lock()
+            sendingDone = true
+            lock.unlock()
+        }
+
+        var hasBegunSendingDone: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return sendingDone
+        }
+    }
+
     public func sendFile(
         connection: ADBSocketConnection,
         localFileURL: URL,
@@ -278,6 +295,7 @@ public struct ADBSyncClient: Sendable {
         }
 
         let mtimeU32 = Self.clampMtimeToUInt32(mtime)
+        let doneState = SendDoneState()
 
         try await withThrowingTaskGroup(of: SendRaceEvent.self) { group in
             // 1. Reader task: listens for early FAIL during streaming or OKAY after DONE.
@@ -308,6 +326,9 @@ public struct ADBSyncClient: Sendable {
             // 2. Writer task: streams <= 64 KiB DATA chunks sequentially, then sends DONE(mtime).
             group.addTask {
                 var totalSent: UInt64 = 0
+                var lastProgressTime = Date.distantPast
+                var lastReportedBytes: UInt64 = 0
+
                 while true {
                     try Task.checkCancellation()
                     let chunk: Data?
@@ -328,12 +349,22 @@ public struct ADBSyncClient: Sendable {
                     try await connection.writeAll(frame, timeout: idleTimeout, stage: "SEND")
 
                     totalSent &+= UInt64(chunk.count)
+                    let now = Date()
+                    if now.timeIntervalSince(lastProgressTime) >= 0.08 {
+                        lastProgressTime = now
+                        lastReportedBytes = totalSent
+                        onProgress(totalSent)
+                    }
+                }
+
+                if totalSent != lastReportedBytes {
                     onProgress(totalSent)
                 }
 
                 var doneFrame = Data(capacity: 8)
                 doneFrame.append(contentsOf: "DONE".utf8)
                 doneFrame.appendUInt32LE(mtimeU32)
+                doneState.markSendingDone()
                 try await connection.writeAll(doneFrame, timeout: idleTimeout, stage: "SEND")
                 return .writerDone
             }
@@ -344,8 +375,15 @@ public struct ADBSyncClient: Sendable {
 
             switch first {
             case .serverOkay:
+                guard doneState.hasBegunSendingDone else {
+                    group.cancelAll()
+                    throw ADBFileError.protocolError(stage: "SEND", detail: "服务端在发送 DONE 前提前返回 OKAY")
+                }
+                guard let second = try await group.next(), case .writerDone = second else {
+                    group.cancelAll()
+                    throw ADBFileError.protocolError(stage: "SEND", detail: "上传写入状态异常结束")
+                }
                 group.cancelAll()
-                throw ADBFileError.protocolError(stage: "SEND", detail: "服务端在发送 DONE 前提前返回 OKAY")
             case .writerDone:
                 // Enforce idleTimeout while awaiting final OKAY/FAIL after DONE.
                 group.addTask {
@@ -382,6 +420,9 @@ public struct ADBSyncClient: Sendable {
         )
 
         var totalReceived: UInt64 = 0
+        var lastProgressTime = Date.distantPast
+        var lastReportedBytes: UInt64 = 0
+
         while true {
             try Task.checkCancellation()
             let tagData = try await connection.readExact(4, timeout: idleTimeout, stage: "RECV")
@@ -392,6 +433,9 @@ public struct ADBSyncClient: Sendable {
             if tag == "DONE" {
                 // Consume trailing 4-byte length/mtime field (0) of 8B DONE frame
                 _ = try await connection.readExact(4, timeout: idleTimeout, stage: "RECV")
+                if totalReceived != lastReportedBytes {
+                    onProgress(totalReceived)
+                }
                 break
             }
 
@@ -418,7 +462,12 @@ public struct ADBSyncClient: Sendable {
                 let chunk = try await connection.readExact(dataLen, timeout: idleTimeout, stage: "RECV")
                 try Self.writeAllToFileDescriptor(destinationFD, data: chunk)
                 totalReceived &+= UInt64(dataLen)
-                onProgress(totalReceived)
+                let now = Date()
+                if now.timeIntervalSince(lastProgressTime) >= 0.08 {
+                    lastProgressTime = now
+                    lastReportedBytes = totalReceived
+                    onProgress(totalReceived)
+                }
             }
         }
 

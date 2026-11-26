@@ -15,9 +15,11 @@ public actor ADBDeviceTracker {
 
     private var serverGeneration: UInt64 = 0
     private var latestDevices: [ADBDevice] = []
+    private var hasConnectedSnapshot = false
     private var trackTask: Task<Void, Never>?
     private var activeConnection: ADBSocketConnection?
     private var continuations: [UUID: AsyncStream<ADBDeviceTrackingEvent>.Continuation] = [:]
+    private var initialWaiters: [UUID: CheckedContinuation<(generation: UInt64, devices: [ADBDevice]), Error>] = [:]
 
     public init(
         endpoint: ADBServerEndpoint,
@@ -85,6 +87,68 @@ public actor ADBDeviceTracker {
         trackTask = nil
         activeConnection?.close()
         activeConnection = nil
+        hasConnectedSnapshot = false
+        failAllInitialWaiters(error: CancellationError())
+    }
+
+    /// Waits for the tracking loop's first device snapshot so `openSession` binds against the live
+    /// tracker generation instead of racing `refreshOnce()` with `runLoop()`'s initial increment.
+    public func waitForInitialSnapshot(
+        timeout: TimeInterval = ADBSocketConnection.defaultHandshakeTimeout
+    ) async throws -> (generation: UInt64, devices: [ADBDevice]) {
+        if hasConnectedSnapshot {
+            return (serverGeneration, latestDevices)
+        }
+        start()
+
+        let waiterId = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if hasConnectedSnapshot {
+                    continuation.resume(returning: (serverGeneration, latestDevices))
+                    return
+                }
+                initialWaiters[waiterId] = continuation
+
+                Task { [weak self] in
+                    let ns = UInt64(max(0.05, timeout) * 1_000_000_000)
+                    try? await Task.sleep(nanoseconds: ns)
+                    await self?.failInitialWaiter(
+                        id: waiterId,
+                        error: ADBFileError.protocolError(stage: "track-devices", detail: "等待设备跟踪初始化超时")
+                    )
+                }
+            }
+        } onCancel: {
+            Task { [weak self] in
+                await self?.failInitialWaiter(id: waiterId, error: CancellationError())
+            }
+        }
+    }
+
+    private func resolveInitialWaiters(generation: UInt64, devices: [ADBDevice]) {
+        hasConnectedSnapshot = true
+        guard !initialWaiters.isEmpty else { return }
+        let waiters = Array(initialWaiters.values)
+        initialWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume(returning: (generation, devices))
+        }
+    }
+
+    private func failInitialWaiter(id: UUID, error: Error) {
+        if let waiter = initialWaiters.removeValue(forKey: id) {
+            waiter.resume(throwing: error)
+        }
+    }
+
+    private func failAllInitialWaiters(error: Error) {
+        guard !initialWaiters.isEmpty else { return }
+        let waiters = Array(initialWaiters.values)
+        initialWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume(throwing: error)
+        }
     }
 
     /// Performs a one-shot `host:devices-l` refresh using an independent Host Socket.
@@ -95,7 +159,7 @@ public actor ADBDeviceTracker {
             timeout: handshakeTimeout
         )
         defer { conn.close() }
-        if didStart || serverGeneration == 0 {
+        if didStart || (serverGeneration == 0 && trackTask == nil) {
             serverGeneration += 1
         }
         let devices = try await conn.listDevicesLong(timeout: handshakeTimeout)
@@ -151,6 +215,11 @@ public actor ADBDeviceTracker {
                 activeConnection?.close()
                 activeConnection = nil
                 latestDevices = []
+                let hadSnapshot = hasConnectedSnapshot
+                hasConnectedSnapshot = false
+                if !hadSnapshot {
+                    failAllInitialWaiters(error: error)
+                }
                 if let gen = connectedGeneration {
                     broadcast(.disconnected(generation: gen, reason: error.localizedDescription))
                 } else {
@@ -176,6 +245,7 @@ public actor ADBDeviceTracker {
             }
             let devices = ADBSocketConnection.parseDeviceListPayload(text)
             latestDevices = devices
+            resolveInitialWaiters(generation: generation, devices: devices)
             broadcast(.snapshot(generation: generation, devices: devices, usedFallbackTrack: false))
         }
     }
@@ -209,6 +279,7 @@ public actor ADBDeviceTracker {
             try await detailConn.connect(timeout: handshakeTimeout)
             let devices = try await detailConn.listDevicesLong(timeout: handshakeTimeout)
             latestDevices = devices
+            resolveInitialWaiters(generation: generation, devices: devices)
             broadcast(.snapshot(generation: generation, devices: devices, usedFallbackTrack: true))
         }
     }

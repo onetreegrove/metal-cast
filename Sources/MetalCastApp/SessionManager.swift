@@ -56,11 +56,10 @@ public final class SessionManager: ObservableObject {
     public func startDeviceTrackingIfNeeded() async {
         guard trackingTask == nil else { return }
         do {
-            let endpoint = try ADBServerEndpoint.resolve()
-            let tracker = ADBDeviceTracker(endpoint: endpoint)
+            // Reuse the shared ADBDeviceTracker owned by ADBFileService to avoid duplicate track-devices connections.
+            let tracker = try await ADBFileService.shared.ensureTrackerStarted()
             self.deviceTracker = tracker
             let stream = await tracker.events()
-            await tracker.start()
 
             trackingTask = Task { [weak self] in
                 for await event in stream {

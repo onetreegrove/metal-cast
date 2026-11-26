@@ -55,6 +55,8 @@ public actor ADBFileService: ADBFileServicing {
 
     private var tracker: ADBDeviceTracker?
     private var trackerTask: Task<Void, Never>?
+    private var trackerStartTask: Task<ADBDeviceTracker, Error>?
+    private var trackerStartEndpoint: ADBServerEndpoint?
     private var sessions: [ADBFileSessionID: BoundSession] = [:]
     private var tasks: [UUID: ManagedTask] = [:]
     private var deviceQueues: [String: [UUID]] = [:] // deviceQueueKey -> FIFO queued/running taskIds
@@ -109,25 +111,65 @@ public actor ADBFileService: ADBFileServicing {
 
     public func ensureTrackerStarted() async throws -> ADBDeviceTracker {
         let endpoint = try ADBServerEndpoint.resolve(explicit: endpointOverride)
-        if let tracker, tracker.endpoint == endpoint {
+        if let tracker, tracker.endpoint == endpoint, trackerTask != nil {
             return tracker
         }
+        if let inFlight = trackerStartTask, trackerStartEndpoint == endpoint {
+            return try await inFlight.value
+        }
 
+        if let staleStart = trackerStartTask {
+            staleStart.cancel()
+            trackerStartTask = nil
+            trackerStartEndpoint = nil
+        }
+
+        let oldTask = trackerTask
+        let oldTracker = tracker
+        self.tracker = nil
+        self.trackerTask = nil
+
+        let starter = self.starter
+        let setupTask = Task<ADBDeviceTracker, Error> {
+            oldTask?.cancel()
+            await oldTracker?.stop()
+            try Task.checkCancellation()
+
+            let newTracker = ADBDeviceTracker(endpoint: endpoint, starter: starter)
+            let stream = await newTracker.events()
+            await newTracker.start()
+            if Task.isCancelled {
+                await newTracker.stop()
+                throw CancellationError()
+            }
+            self.installStartedTracker(newTracker, stream: stream)
+            return newTracker
+        }
+
+        self.trackerStartTask = setupTask
+        self.trackerStartEndpoint = endpoint
+        defer {
+            if self.trackerStartEndpoint == endpoint {
+                self.trackerStartTask = nil
+                self.trackerStartEndpoint = nil
+            }
+        }
+        return try await setupTask.value
+    }
+
+    private func installStartedTracker(_ newTracker: ADBDeviceTracker, stream: AsyncStream<ADBDeviceTrackingEvent>) {
         trackerTask?.cancel()
-        await tracker?.stop()
-
-        let newTracker = ADBDeviceTracker(endpoint: endpoint, starter: starter)
         self.tracker = newTracker
-        let stream = await newTracker.events()
-        await newTracker.start()
-
-        trackerTask = Task { [weak self] in
+        self.trackerTask = Task { [weak self] in
             for await event in stream {
                 guard let self else { break }
                 await self.handleTrackingEvent(event)
             }
         }
-        return newTracker
+    }
+
+    private func isTerminal(_ state: ADBFileTaskState) -> Bool {
+        [.completed, .skipped, .cancelled, .failed, .pendingConfirmation].contains(state)
     }
 
     private func handleTrackingEvent(_ event: ADBDeviceTrackingEvent) async {
@@ -153,12 +195,18 @@ public actor ADBFileService: ADBFileServicing {
         guard sessions.removeValue(forKey: sessionId) != nil else { return }
         browser.invalidateSession(sessionId)
 
+        let qKey = deviceQueueKey(sessionId)
         for (taskId, managed) in tasks where managed.snapshot.sessionId == sessionId {
-            if managed.snapshot.state == .queued {
+            if let running = managed.runningTask {
+                if managed.snapshot.state == .queued || managed.snapshot.state == .transferring {
+                    running.cancel()
+                }
+            } else if activeDeviceHeadTasks[qKey] == taskId {
+                continue
+            } else if managed.snapshot.state == .queued {
+                deviceQueues[qKey]?.removeAll { $0 == taskId }
                 tasks[taskId]?.snapshot = updatingSnapshot(managed.snapshot, state: .failed, detail: "会话已失效: \(reason)")
                 emit(.taskUpdated(tasks[taskId]!.snapshot))
-            } else if managed.snapshot.state == .transferring {
-                managed.runningTask?.cancel()
             }
         }
 
@@ -174,8 +222,15 @@ public actor ADBFileService: ADBFileServicing {
         }
 
         let activeTracker = try await ensureTrackerStarted()
-        let (_, devices) = try await activeTracker.refreshOnce()
-        let generation = await activeTracker.currentGeneration
+        var (generation, devices) = try await activeTracker.waitForInitialSnapshot(
+            timeout: ADBSocketConnection.defaultHandshakeTimeout
+        )
+
+        if !devices.contains(where: { $0.state == .device && $0.transportId == transportId && $0.serial == device.serial }) {
+            let refreshed = try await activeTracker.refreshOnce()
+            generation = refreshed.generation
+            devices = refreshed.devices
+        }
 
         guard devices.contains(where: { $0.state == .device && $0.transportId == transportId && $0.serial == device.serial }) else {
             throw ADBFileError.sessionInvalidated
@@ -215,20 +270,27 @@ public actor ADBFileService: ADBFileServicing {
             }
         }
 
-        // Probe mv -nT / mv -n commit capability once per session so UI reflects upload readiness immediately.
+        // Probe mv -nT / mv -n commit capability once per session; fall back to physicalRoot if initial dir is read-only.
         let probePath = (try? ADBPathUtils.buildRemotePath(physicalRoot: physicalRoot, components: initialComponents)) ?? physicalRoot
-        let commitMode: ADBCommitMode
-        let probed: Bool
-        if let detected = try? await shellClient.probeCommitCapability(
-            endpoint: endpoint,
-            transportId: transportId,
-            parentPhysicalPath: probePath
-        ) {
-            commitMode = detected
+        var commitMode: ADBCommitMode = .unsupported
+        var probed = false
+        do {
+            commitMode = try await shellClient.probeCommitCapability(
+                endpoint: endpoint,
+                transportId: transportId,
+                parentPhysicalPath: probePath
+            )
             probed = true
-        } else {
-            commitMode = .unsupported
-            probed = false
+        } catch {
+            if !initialComponents.isEmpty,
+               let fallback = try? await shellClient.probeCommitCapability(
+                   endpoint: endpoint,
+                   transportId: transportId,
+                   parentPhysicalPath: physicalRoot
+               ) {
+                commitMode = fallback
+                probed = true
+            }
         }
 
         let sessionId = ADBFileSessionID(
@@ -254,6 +316,7 @@ public actor ADBFileService: ADBFileServicing {
             isWifi: bound.isWifi,
             physicalRoot: physicalRoot,
             capabilities: caps,
+            commitModeProbed: probed,
             initialComponents: initialComponents
         )
     }
@@ -323,7 +386,8 @@ public actor ADBFileService: ADBFileServicing {
                 bytesTransferred: 0,
                 bytesPerSecond: 0,
                 state: .queued,
-                detail: "等待设备写队列"
+                detail: "等待设备写队列",
+                directoryComponents: targetComponents
             )
             tasks[id] = ManagedTask(
                 snapshot: snapshot,
@@ -370,7 +434,8 @@ public actor ADBFileService: ADBFileServicing {
                 bytesTransferred: 0,
                 bytesPerSecond: 0,
                 state: .queued,
-                detail: "等待设备写队列"
+                detail: "等待设备写队列",
+                directoryComponents: sourceComponents
             )
             tasks[id] = ManagedTask(
                 snapshot: snapshot,
@@ -416,7 +481,8 @@ public actor ADBFileService: ADBFileServicing {
             bytesTransferred: 0,
             bytesPerSecond: 0,
             state: .queued,
-            detail: "等待设备写队列"
+            detail: "等待设备写队列",
+            directoryComponents: directoryComponents
         )
         tasks[id] = ManagedTask(
             snapshot: snapshot,
@@ -432,17 +498,21 @@ public actor ADBFileService: ADBFileServicing {
 
     public func cancelTransfer(taskId: UUID) async {
         guard let managed = tasks[taskId] else { return }
-        switch managed.snapshot.state {
-        case .queued:
-            let qKey = deviceQueueKey(managed.snapshot.sessionId)
+        let qKey = deviceQueueKey(managed.snapshot.sessionId)
+        if let running = managed.runningTask {
+            if managed.snapshot.state == .queued || managed.snapshot.state == .transferring {
+                running.cancel()
+            }
+            return
+        }
+        if activeDeviceHeadTasks[qKey] == taskId {
+            return
+        }
+        if managed.snapshot.state == .queued {
             deviceQueues[qKey]?.removeAll { $0 == taskId }
             tasks[taskId]?.snapshot = updatingSnapshot(managed.snapshot, state: .cancelled, detail: "已从排队取消")
             emit(.taskUpdated(tasks[taskId]!.snapshot))
             pumpDeviceQueue(for: qKey)
-        case .transferring:
-            managed.runningTask?.cancel()
-        default:
-            break
         }
     }
 
@@ -478,10 +548,22 @@ public actor ADBFileService: ADBFileServicing {
         }
     }
 
-    public func clearFinishedTasks(sessionId: ADBFileSessionID? = nil) async {
+    public func clearFinishedTasks(sessionId: ADBFileSessionID? = nil, serial: String? = nil) async {
         let terminalStates: Set<ADBFileTaskState> = [.completed, .skipped, .cancelled, .failed]
         let toRemove = tasks.values
-            .filter { terminalStates.contains($0.snapshot.state) && (sessionId == nil || $0.snapshot.sessionId == sessionId) }
+            .filter { task in
+                guard terminalStates.contains(task.snapshot.state) else { return false }
+                if let sessionId, let serial {
+                    return task.snapshot.sessionId == sessionId || task.snapshot.sessionId.serial == serial
+                }
+                if let sessionId {
+                    return task.snapshot.sessionId == sessionId
+                }
+                if let serial {
+                    return task.snapshot.sessionId.serial == serial
+                }
+                return true
+            }
             .map(\.snapshot.id)
         for id in toRemove {
             tasks.removeValue(forKey: id)
@@ -494,6 +576,9 @@ public actor ADBFileService: ADBFileServicing {
 
     public func retryLedgerCleanup(entryId: UUID) async throws {
         guard let entry = await ledgerStore.entry(id: entryId) else { return }
+        guard entry.state != .pendingConfirmation else {
+            throw ADBFileError.operationUnconfirmed("该记录处于待确认状态，请先点击「核对结果」确认文件是否已提交，再决定清理")
+        }
         guard let activeSession = sessions.values.first(where: {
             $0.sessionId.endpoint == entry.endpoint && $0.sessionId.serial == entry.serial
         }) else {
@@ -519,11 +604,8 @@ public actor ADBFileService: ADBFileServicing {
         emit(.ledgerUpdated(await ledgerStore.entries()))
     }
 
-    public func verifyPendingTask(taskId: UUID) async throws -> ADBFileTaskSnapshot? {
-        guard let managed = tasks[taskId],
-              managed.snapshot.state == .pendingConfirmation,
-              let ledgerId = managed.snapshot.ledgerEntryId,
-              let entry = await ledgerStore.entry(id: ledgerId) else {
+    public func verifyPendingLedgerEntry(entryId: UUID) async throws -> ADBPendingVerifyResult? {
+        guard let entry = await ledgerStore.entry(id: entryId) else {
             return nil
         }
         guard let bound = sessions.values.first(where: {
@@ -546,32 +628,61 @@ public actor ADBFileService: ADBFileServicing {
 
         if check.committed {
             if check.tempDirCleaned {
-                try? await ledgerStore.remove(id: ledgerId)
+                try? await ledgerStore.remove(id: entryId)
             } else {
-                try? await ledgerStore.updateState(id: ledgerId, state: .cleanupPending)
+                try? await ledgerStore.updateState(id: entryId, state: .cleanupPending)
             }
-            let updated = updatingSnapshot(
-                managed.snapshot,
-                state: .completed,
-                bytesTransferred: managed.snapshot.totalBytes ?? managed.snapshot.bytesTransferred,
-                detail: check.tempDirCleaned ? "核对确认：文件已成功提交并清理暂存目录" : "核对确认：文件已提交，空暂存目录待清理"
-            )
-            tasks[taskId]?.snapshot = updated
-            emit(.taskUpdated(updated))
+            var updatedTask: ADBFileTaskSnapshot?
+            if let managed = tasks[entry.taskId] {
+                let updated = updatingSnapshot(
+                    managed.snapshot,
+                    state: .completed,
+                    displayName: entry.finalTargetName,
+                    bytesTransferred: managed.snapshot.totalBytes ?? managed.snapshot.bytesTransferred,
+                    detail: check.tempDirCleaned ? "核对确认：文件已成功提交并清理暂存目录" : "核对确认：文件已提交，空暂存目录待清理"
+                )
+                tasks[entry.taskId]?.snapshot = updated
+                updatedTask = updated
+                emit(.taskUpdated(updated))
+            }
             emit(.ledgerUpdated(await ledgerStore.entries()))
-            return updated
+            return ADBPendingVerifyResult(
+                committed: true,
+                tempDirCleaned: check.tempDirCleaned,
+                finalTargetName: entry.finalTargetName,
+                taskSnapshot: updatedTask
+            )
         } else {
-            try? await ledgerStore.updateState(id: ledgerId, state: .cleanupPending)
-            let updated = updatingSnapshot(
-                managed.snapshot,
-                state: .failed,
-                detail: "核对确认：目标尚未提交，可重试清理暂存目录后重新上传"
-            )
-            tasks[taskId]?.snapshot = updated
-            emit(.taskUpdated(updated))
+            try? await ledgerStore.updateState(id: entryId, state: .cleanupPending)
+            var updatedTask: ADBFileTaskSnapshot?
+            if let managed = tasks[entry.taskId] {
+                let updated = updatingSnapshot(
+                    managed.snapshot,
+                    state: .failed,
+                    displayName: entry.finalTargetName,
+                    detail: "核对确认：目标尚未提交，可重试清理暂存目录后重新上传"
+                )
+                tasks[entry.taskId]?.snapshot = updated
+                updatedTask = updated
+                emit(.taskUpdated(updated))
+            }
             emit(.ledgerUpdated(await ledgerStore.entries()))
-            return updated
+            return ADBPendingVerifyResult(
+                committed: false,
+                tempDirCleaned: false,
+                finalTargetName: entry.finalTargetName,
+                taskSnapshot: updatedTask
+            )
         }
+    }
+
+    public func verifyPendingTask(taskId: UUID) async throws -> ADBFileTaskSnapshot? {
+        guard let managed = tasks[taskId],
+              managed.snapshot.state == .pendingConfirmation,
+              let ledgerId = managed.snapshot.ledgerEntryId else {
+            return nil
+        }
+        return try await verifyPendingLedgerEntry(entryId: ledgerId)?.taskSnapshot
     }
 
     public func hasActiveWork() -> Bool {
@@ -600,8 +711,8 @@ public actor ADBFileService: ADBFileServicing {
             }
         }
 
-        // Wait up to budget for in-flight committing/cleanup tasks to settle.
-        while Date() < deadline && tasks.values.contains(where: { $0.snapshot.state == .committing || $0.snapshot.state == .transferring }) {
+        // Wait up to budget for in-flight active head / committing / cleanup tasks to settle.
+        while Date() < deadline && (!activeDeviceHeadTasks.isEmpty || tasks.values.contains(where: { $0.snapshot.state == .committing || $0.snapshot.state == .transferring })) {
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
 
@@ -712,6 +823,7 @@ public actor ADBFileService: ADBFileServicing {
             )
             session.commitModeProbed = true
             sessions[bound.sessionId] = session
+            emit(.sessionCapabilitiesUpdated(bound.sessionId, capabilities: session.capabilities, commitModeProbed: true))
         }
         return mode
     }
@@ -734,14 +846,16 @@ public actor ADBFileService: ADBFileServicing {
         }
 
         var ledgerEntry: ADBLedgerEntry?
-        var createdRemoteTempDir = false
+        var mayHaveCreatedRemoteTempDir = false
 
         do {
+            try Task.checkCancellation()
             let commitMode = try await ensureCommitModeProbed(bound: bound, parentPhysicalPath: parentPhysicalPath)
             guard commitMode != .unsupported else {
                 throw ADBFileError.unsupportedDevice("当前设备缺少 mv -n，禁止安全上传")
             }
 
+            try Task.checkCancellation()
             let tempDirName = ".metalcast-tmp-\(UUID().uuidString.lowercased())"
             let tempPayloadName = "payload"
             let tempFilePath = "\(parentPhysicalPath)/\(tempDirName)/\(tempPayloadName)"
@@ -773,14 +887,16 @@ public actor ADBFileService: ADBFileServicing {
             let mkdirConn = ADBSocketConnection(endpoint: bound.sessionId.endpoint)
             defer { mkdirConn.close() }
             try await mkdirConn.connect()
+            try Task.checkCancellation()
+            mayHaveCreatedRemoteTempDir = true
             try await shellClient.createTempUploadDirectory(
                 connection: mkdirConn,
                 transportId: bound.sessionId.transportId,
                 parentPhysicalPath: parentPhysicalPath,
                 tempDirName: tempDirName
             )
-            createdRemoteTempDir = true
 
+            try Task.checkCancellation()
             try await ledgerStore.updateState(id: entry.id, state: .created)
             emit(.ledgerUpdated(await ledgerStore.entries()))
 
@@ -814,6 +930,8 @@ public actor ADBFileService: ADBFileServicing {
             updateTaskProgressState(taskId: taskId, state: .committing, detail: "正在提交…")
 
             var candidateName = item.targetFileName
+            var triedNormalized: Set<String> = [ADBTransferPlanner.normalizeAndroidName(candidateName)]
+            var conflictAttempts = 0
             var commitOutcome: ADBUploadCommitOutcome?
 
             while true {
@@ -837,19 +955,25 @@ public actor ADBFileService: ADBFileServicing {
                             commitOutcome = .targetConflict
                             break
                         } else {
+                            conflictAttempts += 1
+                            guard conflictAttempts <= ADBTransferPlanner.maxRenameAttempt else {
+                                throw ADBFileError.invalidFileName("同名文件过多，提交重试达到上限")
+                            }
                             // Re-scan current directory names and pick next Name (k).ext
                             let existing = try await listRemoteEntryNames(
                                 bound: bound,
                                 components: targetComponents
                             )
-                            var occupied = Set(existing.map(ADBTransferPlanner.normalizeAndroidName))
-                            occupied.insert(ADBTransferPlanner.normalizeAndroidName(candidateName))
+                            let occupied = Set(existing.map(ADBTransferPlanner.normalizeAndroidName)).union(triedNormalized)
                             candidateName = try ADBTransferPlanner.nextAvailableRenameCandidate(
-                                originalName: item.targetFileName,
+                                originalName: item.originalBaseName,
                                 occupiedNormalizedNames: occupied,
                                 normalize: ADBTransferPlanner.normalizeAndroidName,
                                 validateCandidate: { try ADBPathUtils.validateUploadFileName($0) }
                             )
+                            triedNormalized.insert(ADBTransferPlanner.normalizeAndroidName(candidateName))
+                            try? await ledgerStore.updateFinalTargetName(id: entry.id, finalTargetName: candidateName)
+                            emit(.ledgerUpdated(await ledgerStore.entries()))
                             continue
                         }
                     } else {
@@ -905,7 +1029,7 @@ public actor ADBFileService: ADBFileServicing {
                 break
             }
         } catch is CancellationError {
-            if createdRemoteTempDir, let entry = ledgerEntry {
+            if mayHaveCreatedRemoteTempDir, let entry = ledgerEntry {
                 await cleanupTempDirOrMarkPending(
                     bound: bound,
                     entry: entry,
@@ -919,7 +1043,7 @@ public actor ADBFileService: ADBFileServicing {
             }
             updateTaskTerminal(taskId: taskId, state: .cancelled, detail: "已取消上传并清理暂存")
         } catch {
-            if createdRemoteTempDir, let entry = ledgerEntry {
+            if mayHaveCreatedRemoteTempDir, let entry = ledgerEntry {
                 await cleanupTempDirOrMarkPending(
                     bound: bound,
                     entry: entry,
@@ -942,18 +1066,25 @@ public actor ADBFileService: ADBFileServicing {
         tempDirName: String,
         tempPayloadName: String
     ) async {
+        // Run cleanup in a detached non-cancelled task so user upload cancellation never aborts Socket connect.
+        let endpoint = bound.sessionId.endpoint
+        let transportId = bound.sessionId.transportId
+        let shell = self.shellClient
+
         do {
-            let conn = ADBSocketConnection(endpoint: bound.sessionId.endpoint)
-            defer { conn.close() }
-            try await conn.connect(timeout: 3.0)
-            try await shellClient.cleanupTempUploadDirectory(
-                connection: conn,
-                transportId: bound.sessionId.transportId,
-                parentPhysicalPath: parentPhysicalPath,
-                tempDirName: tempDirName,
-                tempPayloadName: tempPayloadName,
-                timeout: 4.0
-            )
+            try await Task.detached(priority: .utility) {
+                let conn = ADBSocketConnection(endpoint: endpoint)
+                defer { conn.close() }
+                try await conn.connect(timeout: 3.0)
+                try await shell.cleanupTempUploadDirectory(
+                    connection: conn,
+                    transportId: transportId,
+                    parentPhysicalPath: parentPhysicalPath,
+                    tempDirName: tempDirName,
+                    tempPayloadName: tempPayloadName,
+                    timeout: 4.0
+                )
+            }.value
             try? await ledgerStore.remove(id: entry.id)
         } catch {
             try? await ledgerStore.updateState(id: entry.id, state: .cleanupPending)
@@ -982,6 +1113,7 @@ public actor ADBFileService: ADBFileServicing {
         }
 
         do {
+            try Task.checkCancellation()
             let remoteComponents = sourceComponents + [item.remoteEntry.rawNameBytes]
             let remotePathBytes = try ADBPathUtils.buildSyncPathBytes(
                 physicalRoot: bound.physicalRoot,
@@ -1003,10 +1135,12 @@ public actor ADBFileService: ADBFileServicing {
             try? await syncClient.sendQuit(connection: statConnBefore)
             statConnBefore.close()
 
+            try Task.checkCancellation()
             let (createdPartURL, openedFD) = try ADBMacFilePublisher.createExclusivePartFile(in: localDirectory)
             partURL = createdPartURL
             fd = openedFD
 
+            try Task.checkCancellation()
             updateTaskProgressState(taskId: taskId, state: .transferring, detail: "正在下载到临时文件…")
 
             let recvConn = ADBSocketConnection(endpoint: bound.sessionId.endpoint)
@@ -1059,7 +1193,8 @@ public actor ADBFileService: ADBFileServicing {
                 partURL: createdPartURL,
                 targetDirectory: localDirectory,
                 preferredName: item.targetFileName,
-                conflictResolution: item.conflictResolution
+                conflictResolution: item.conflictResolution,
+                originalBaseName: item.originalBaseName
             ) {
                 updateTaskTerminal(
                     taskId: taskId,
@@ -1088,16 +1223,18 @@ public actor ADBFileService: ADBFileServicing {
         items: [ADBDeleteTarget]
     ) async {
         do {
+            try Task.checkCancellation()
             let parentPhysicalPath = try ADBPathUtils.buildRemotePath(
                 physicalRoot: bound.physicalRoot,
                 components: directoryComponents
             )
+            try Task.checkCancellation()
             updateTaskProgressState(taskId: taskId, state: .committing, detail: "正在逐项删除 (\(items.count))…")
 
             var results: [ADBDeleteItemResult] = []
             var abortedDisconnect = false
 
-            for (idx, target) in items.enumerated() {
+            for target in items {
                 if abortedDisconnect || Task.isCancelled {
                     results.append(
                         ADBDeleteItemResult(
@@ -1153,11 +1290,26 @@ public actor ADBFileService: ADBFileServicing {
                     continue
                 }
 
-                // Identity matched — execute single-file non-recursive rm --
+                // Identity matched — establish connection first (connect failures have not sent delete command).
+                let delConn = ADBSocketConnection(endpoint: bound.sessionId.endpoint)
+                defer { delConn.close() }
                 do {
-                    let delConn = ADBSocketConnection(endpoint: bound.sessionId.endpoint)
-                    defer { delConn.close() }
                     try await delConn.connect()
+                } catch {
+                    abortedDisconnect = true
+                    results.append(
+                        ADBDeleteItemResult(
+                            fileName: entry.displayName,
+                            rawNameBytes: entry.rawNameBytes,
+                            status: .notExecuted,
+                            message: "未执行（连接异常: \(error.localizedDescription)）"
+                        )
+                    )
+                    continue
+                }
+
+                // Connected — execute single-file non-recursive rm --
+                do {
                     let status = try await shellClient.deleteSingleFile(
                         connection: delConn,
                         transportId: bound.sessionId.transportId,
@@ -1184,13 +1336,12 @@ public actor ADBFileService: ADBFileServicing {
                     )
                 } catch {
                     abortedDisconnect = true
-                    let isPending = idx < items.count
                     results.append(
                         ADBDeleteItemResult(
                             fileName: entry.displayName,
                             rawNameBytes: entry.rawNameBytes,
-                            status: isPending ? .pendingConfirmation : .notExecuted,
-                            message: "连接中断: \(error.localizedDescription)"
+                            status: .pendingConfirmation,
+                            message: "待确认（连接中断: \(error.localizedDescription)）"
                         )
                     )
                 }
@@ -1207,6 +1358,8 @@ public actor ADBFileService: ADBFileServicing {
                 detail: summary,
                 deleteResults: results
             )
+        } catch is CancellationError {
+            updateTaskTerminal(taskId: taskId, state: .cancelled, detail: "已取消删除")
         } catch {
             updateTaskTerminal(taskId: taskId, state: .failed, detail: error.localizedDescription)
         }
@@ -1252,26 +1405,27 @@ public actor ADBFileService: ADBFileServicing {
 
     private func recordProgress(taskId: UUID, bytesTransferred: UInt64) {
         guard var managed = tasks[taskId], managed.snapshot.state == .transferring else { return }
+        let monotonicBytes = max(managed.snapshot.bytesTransferred, bytesTransferred)
         let now = Date()
         let windowElapsed = now.timeIntervalSince(managed.rateWindowStartTime)
         var rate = managed.smoothedBytesPerSec
 
         if windowElapsed >= 0.25 {
-            let deltaBytes = bytesTransferred >= managed.rateWindowStartBytes
-                ? Double(bytesTransferred - managed.rateWindowStartBytes)
+            let deltaBytes = monotonicBytes >= managed.rateWindowStartBytes
+                ? Double(monotonicBytes - managed.rateWindowStartBytes)
                 : 0
             let instantRate = deltaBytes / windowElapsed
             rate = managed.smoothedBytesPerSec == 0 ? instantRate : (0.4 * instantRate + 0.6 * managed.smoothedBytesPerSec)
             if windowElapsed >= 1.0 {
                 managed.rateWindowStartTime = now
-                managed.rateWindowStartBytes = bytesTransferred
+                managed.rateWindowStartBytes = monotonicBytes
             }
             managed.smoothedBytesPerSec = rate
         }
 
         managed.snapshot = updatingSnapshot(
             managed.snapshot,
-            bytesTransferred: bytesTransferred,
+            bytesTransferred: monotonicBytes,
             bytesPerSecond: rate
         )
 
@@ -1286,7 +1440,7 @@ public actor ADBFileService: ADBFileServicing {
     }
 
     private func updateTaskProgressState(taskId: UUID, state: ADBFileTaskState, detail: String) {
-        guard var managed = tasks[taskId] else { return }
+        guard var managed = tasks[taskId], !isTerminal(managed.snapshot.state) else { return }
         let now = Date()
         managed.rateWindowStartTime = now
         managed.rateWindowStartBytes = managed.snapshot.bytesTransferred
@@ -1342,6 +1496,7 @@ public actor ADBFileService: ADBFileServicing {
             bytesPerSecond: bytesPerSecond ?? old.bytesPerSecond,
             state: state ?? old.state,
             detail: detail ?? old.detail,
+            directoryComponents: old.directoryComponents,
             localOutputURL: localOutputURL ?? old.localOutputURL,
             ledgerEntryId: ledgerEntryId ?? old.ledgerEntryId,
             deleteResults: deleteResults ?? old.deleteResults

@@ -278,4 +278,90 @@ struct ADBSyncClientTests {
         #expect(listed[0].isSizeReliable == false)
         #expect(listed[0].size == nil)
     }
+
+    @Test("sendFile tolerates immediate OKAY right after DONE begins and still rejects premature OKAY")
+    func sendFileImmediateAndPrematureOkay() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metalcast-send-race-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let emptyFile = tempDir.appendingPathComponent("zero.bin")
+        try Data().write(to: emptyFile)
+
+        // 1. Immediate OKAY after DONE across repeated 0-byte uploads must succeed
+        let okServer = try await MockADBTCPServer { conn in
+            Task {
+                defer { conn.close() }
+                guard try await conn.readHostRequest() == "host:transport-id:3" else { return }
+                try await conn.send(Data("OKAY".utf8))
+                guard try await conn.readHostRequest() == "sync:" else { return }
+                try await conn.send(Data("OKAY".utf8))
+
+                let (tag, _) = try await Self.readSyncRequest(from: conn)
+                guard tag == "SEND" else { return }
+                let doneTag = String(decoding: try await conn.readExact(4), as: UTF8.self)
+                _ = try await conn.readExact(4)
+                if doneTag == "DONE" {
+                    var okay = Data("OKAY".utf8)
+                    Self.appendLE32(&okay, 0)
+                    try await conn.send(okay)
+                }
+                _ = try? await Self.readSyncRequest(from: conn) // QUIT
+            }
+        }
+        defer { okServer.stop() }
+
+        let okEndpoint = try ADBServerEndpoint(host: "127.0.0.1", port: okServer.port)
+        let sync = ADBSyncClient()
+        for _ in 0..<5 {
+            let conn = ADBSocketConnection(endpoint: okEndpoint)
+            defer { conn.close() }
+            try await conn.connect()
+            try await conn.openDeviceService(transportId: "3", service: "sync:")
+            try await sync.sendFile(
+                connection: conn,
+                localFileURL: emptyFile,
+                remoteTempPath: "/storage/emulated/0/Download/.tmp/payload",
+                mtime: Date()
+            ) { _ in }
+            try await sync.sendQuit(connection: conn)
+        }
+
+        // 2. Genuine premature OKAY sent before any DONE while chunks are still streaming must throw
+        let bigFile = tempDir.appendingPathComponent("multi.bin")
+        try Data(repeating: 0x5A, count: 200_000).write(to: bigFile)
+
+        let prematureServer = try await MockADBTCPServer { conn in
+            Task {
+                defer { conn.close() }
+                guard try await conn.readHostRequest() == "host:transport-id:3" else { return }
+                try await conn.send(Data("OKAY".utf8))
+                guard try await conn.readHostRequest() == "sync:" else { return }
+                try await conn.send(Data("OKAY".utf8))
+
+                let _ = try await Self.readSyncRequest(from: conn)
+                // Send OKAY immediately before client sends DONE
+                var okay = Data("OKAY".utf8)
+                Self.appendLE32(&okay, 0)
+                try await conn.send(okay)
+            }
+        }
+        defer { prematureServer.stop() }
+
+        let badEndpoint = try ADBServerEndpoint(host: "127.0.0.1", port: prematureServer.port)
+        let badConn = ADBSocketConnection(endpoint: badEndpoint)
+        defer { badConn.close() }
+        try await badConn.connect()
+        try await badConn.openDeviceService(transportId: "3", service: "sync:")
+
+        await #expect(throws: ADBFileError.self) {
+            try await sync.sendFile(
+                connection: badConn,
+                localFileURL: bigFile,
+                remoteTempPath: "/storage/emulated/0/Download/.tmp/payload",
+                mtime: Date()
+            ) { _ in }
+        }
+    }
 }

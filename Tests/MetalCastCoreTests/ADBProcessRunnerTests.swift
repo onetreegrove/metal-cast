@@ -142,4 +142,56 @@ struct ADBProcessRunnerTests {
             _ = try await runner.run(args: ["start-server"], timeout: 0.25)
         }
     }
+
+    @Test("maxOutputBytes truncation inside multi-byte UTF-8 preserves valid prefix instead of empty string")
+    func multiByteUtf8TruncationPreservesOutput() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let mockAdb = try makeMockExecutable(in: dir, scriptBody: """
+        printf '中文测试输出ABCDEF'
+        """)
+
+        let runner = ADBProcessRunner(
+            customAdbPath: mockAdb.path,
+            explicitEndpoint: try ADBServerEndpoint(),
+            environmentProvider: { ["PATH": "/usr/bin:/bin"] }
+        )
+
+        // 7 bytes splits inside the 3rd Chinese 3-byte UTF-8 character ("测" = bytes 6..8)
+        let result = try await runner.run(args: ["version"], maxOutputBytes: 7)
+        #expect(result.exitCode == 0)
+        #expect(!result.stdout.isEmpty)
+        #expect(result.stdout.hasPrefix("中文"))
+    }
+
+    @Test("Pre-cancelled and immediate-cancelled tasks do not crash releasing suspended DispatchSources")
+    func preCancelledTaskDoesNotCrashOnSuspendedSources() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let mockAdb = try makeMockExecutable(in: dir, scriptBody: "sleep 1")
+        let runner = ADBProcessRunner(
+            customAdbPath: mockAdb.path,
+            explicitEndpoint: try ADBServerEndpoint(),
+            environmentProvider: { ["PATH": "/usr/bin:/bin"] }
+        )
+
+        for i in 0..<24 {
+            let task = Task {
+                if i % 2 == 0 {
+                    await Task.yield()
+                }
+                return try await runner.run(args: ["version"])
+            }
+            if i % 3 == 0 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+            }
+            task.cancel()
+
+            await #expect(throws: CancellationError.self) {
+                _ = try await task.value
+            }
+        }
+    }
 }

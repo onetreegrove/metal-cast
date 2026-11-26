@@ -70,7 +70,8 @@ public final class FileManagerViewModel: ObservableObject {
         public let results: [ADBDeleteItemResult]
     }
 
-    public let bindingKey: String
+    public private(set) var bindingKey: String
+    public var onBindingKeyChanged: ((String, String) -> Void)?
     @Published public var boundDevice: ADBDevice
     @Published public var sessionSnapshot: ADBFileSessionSnapshot?
     @Published public var currentComponents: [Data] = []
@@ -132,11 +133,16 @@ public final class FileManagerViewModel: ObservableObject {
             case .kind:
                 cmp = entryKindLabel(lhs).localizedStandardCompare(entryKindLabel(rhs))
             case .size:
-                let lSize = lhs.isSizeReliable ? Int64(lhs.size ?? 0) : -1
-                let rSize = rhs.isSizeReliable ? Int64(rhs.size ?? 0) : -1
-                if lSize != rSize {
-                    cmp = lSize < rSize ? .orderedAscending : .orderedDescending
-                } else {
+                let lSize = lhs.isSizeReliable ? lhs.size : nil
+                let rSize = rhs.isSizeReliable ? rhs.size : nil
+                switch (lSize, rSize) {
+                case let (l?, r?) where l != r:
+                    cmp = l < r ? .orderedAscending : .orderedDescending
+                case (.some, .none):
+                    cmp = .orderedDescending
+                case (.none, .some):
+                    cmp = .orderedAscending
+                default:
                     cmp = lhs.displayName.localizedStandardCompare(rhs.displayName)
                 }
             case .mtime:
@@ -182,7 +188,7 @@ public final class FileManagerViewModel: ObservableObject {
     public var canUpload: Bool {
         guard !isSessionBlocked, let snap = sessionSnapshot else { return false }
         if case .permissionDenied = viewState { return false }
-        return snap.capabilities.commitMode != .unsupported
+        return !snap.commitModeProbed || snap.capabilities.commitMode != .unsupported
     }
 
     public var canDownloadOrDeleteSelection: Bool {
@@ -233,8 +239,25 @@ public final class FileManagerViewModel: ObservableObject {
             return
         }
 
+        if matched.selectionKey != bindingKey {
+            let oldKey = bindingKey
+            bindingKey = matched.selectionKey
+            onBindingKeyChanged?(oldKey, matched.selectionKey)
+        }
         boundDevice = matched
         await openInitialSession()
+    }
+
+    public func updateReboundDevice(_ device: ADBDevice) {
+        let oldKey = bindingKey
+        bindingKey = device.selectionKey
+        boundDevice = device
+        if oldKey != bindingKey {
+            onBindingKeyChanged?(oldKey, bindingKey)
+        }
+        if case .disconnected = viewState {
+            Task { await openInitialSession() }
+        }
     }
 
     public func cancelWindowTasks() async {
@@ -244,13 +267,20 @@ public final class FileManagerViewModel: ObservableObject {
         }
     }
 
+    public func shutdown() {
+        eventStreamTask?.cancel()
+        eventStreamTask = nil
+        browseTask?.cancel()
+        browseTask = nil
+    }
+
     private func startObservingServiceEvents() {
         eventStreamTask?.cancel()
+        let service = self.fileService
         eventStreamTask = Task { [weak self] in
-            guard let self else { return }
-            let stream = await fileService.events
+            let stream = await service.events
             for await event in stream {
-                if Task.isCancelled { break }
+                guard let self, !Task.isCancelled else { break }
                 self.handleServiceEvent(event)
             }
         }
@@ -267,14 +297,19 @@ public final class FileManagerViewModel: ObservableObject {
                 isDrawerOpen = true
             }
 
-            if snap.kind == .upload && snap.state == .completed {
-                Task { await self.loadCurrentDirectory() }
+            if snap.kind == .upload && snap.state == .completed,
+               snap.sessionId == sessionSnapshot?.sessionId,
+               snap.directoryComponents == currentComponents {
+                Task { await self.loadCurrentDirectory(silent: true) }
             }
-            if snap.kind == .delete && (snap.state == .completed || snap.state == .pendingConfirmation) {
+            if snap.kind == .delete && (snap.state == .completed || snap.state == .pendingConfirmation),
+               snap.sessionId == sessionSnapshot?.sessionId {
                 if let results = snap.deleteResults {
                     deleteReportSheet = DeleteReportSheetState(results: results)
                 }
-                Task { await self.loadCurrentDirectory() }
+                if snap.directoryComponents == currentComponents {
+                    Task { await self.loadCurrentDirectory(silent: true) }
+                }
             }
 
         case .activeTransferSlotCountChanged(let count):
@@ -285,6 +320,18 @@ public final class FileManagerViewModel: ObservableObject {
             if !entries.isEmpty {
                 isDrawerOpen = true
             }
+
+        case .sessionCapabilitiesUpdated(let sid, let caps, let probed):
+            guard let current = sessionSnapshot, current.sessionId == sid else { return }
+            sessionSnapshot = ADBFileSessionSnapshot(
+                sessionId: current.sessionId,
+                deviceName: current.deviceName,
+                isWifi: current.isWifi,
+                physicalRoot: current.physicalRoot,
+                capabilities: caps,
+                commitModeProbed: probed,
+                initialComponents: current.initialComponents
+            )
 
         case .sessionInvalidated(let sid, let reason):
             guard sessionSnapshot?.sessionId == sid else { return }
@@ -380,14 +427,16 @@ public final class FileManagerViewModel: ObservableObject {
         selectedEntryIds = Set(operable.map(\.id))
     }
 
-    public func loadCurrentDirectory() async {
+    public func loadCurrentDirectory(silent: Bool = false) async {
         guard let snap = sessionSnapshot else { return }
         browseTask?.cancel()
         let requestId = UUID()
         currentRequestId = requestId
-        rawEntries = []
-        selectedEntryIds.removeAll()
-        viewState = .loading
+        if !silent {
+            rawEntries = []
+            selectedEntryIds.removeAll()
+            viewState = .loading
+        }
 
         let comps = currentComponents
         let stream = await fileService.listDirectory(
@@ -397,28 +446,33 @@ public final class FileManagerViewModel: ObservableObject {
         )
 
         browseTask = Task { [weak self] in
-            guard let self else { return }
             var buffer: [ADBRemoteEntry] = []
             do {
                 for try await batch in stream {
-                    guard self.currentRequestId == batch.requestId,
+                    guard let self,
+                          !Task.isCancelled,
+                          self.currentRequestId == batch.requestId,
                           self.sessionSnapshot?.sessionId == batch.sessionId else {
                         return
                     }
                     if !batch.entries.isEmpty {
                         buffer.append(contentsOf: batch.entries)
-                        self.rawEntries = buffer
-                        self.viewState = .normal
+                        if !silent {
+                            self.rawEntries = buffer
+                            self.viewState = .normal
+                        }
                     }
                     if batch.isFinal {
                         self.rawEntries = buffer
+                        let validIds = Set(buffer.map(\.id))
+                        self.selectedEntryIds.formIntersection(validIds)
                         self.viewState = buffer.isEmpty ? .empty : .normal
                     }
                 }
             } catch is CancellationError {
                 return
             } catch let err as ADBFileError {
-                guard self.currentRequestId == requestId else { return }
+                guard let self, self.currentRequestId == requestId else { return }
                 switch err {
                 case .permissionDenied(let msg):
                     self.viewState = .permissionDenied(msg)
@@ -434,7 +488,7 @@ public final class FileManagerViewModel: ObservableObject {
                     self.viewState = .error(err.localizedDescription)
                 }
             } catch {
-                guard self.currentRequestId == requestId else { return }
+                guard let self, self.currentRequestId == requestId else { return }
                 self.viewState = .error(error.localizedDescription)
             }
         }
@@ -609,6 +663,7 @@ public final class FileManagerViewModel: ObservableObject {
                         ADBUploadPlanItem(
                             localURL: baseItem.localURL,
                             targetFileName: candidate,
+                            originalBaseName: row.originalName,
                             conflictResolution: .keepBoth,
                             fileSize: baseItem.fileSize,
                             mtime: baseItem.mtime
@@ -657,6 +712,7 @@ public final class FileManagerViewModel: ObservableObject {
                         ADBDownloadPlanItem(
                             remoteEntry: baseItem.remoteEntry,
                             targetFileName: candidate,
+                            originalBaseName: row.originalName,
                             conflictResolution: .keepBoth
                         )
                     )
@@ -731,7 +787,25 @@ public final class FileManagerViewModel: ObservableObject {
     public func verifyPendingTask(id: UUID) async {
         do {
             _ = try await fileService.verifyPendingTask(taskId: id)
+            ledgerEntries = await fileService.ledgerEntries()
             await loadCurrentDirectory()
+        } catch {
+            bannerMessage = error.localizedDescription
+        }
+    }
+
+    public func verifyPendingLedgerEntry(id: UUID) async {
+        do {
+            guard let result = try await fileService.verifyPendingLedgerEntry(entryId: id) else { return }
+            ledgerEntries = await fileService.ledgerEntries()
+            if result.committed {
+                bannerMessage = result.tempDirCleaned
+                    ? "核对确认：文件「\(result.finalTargetName)」已成功提交并清理暂存目录"
+                    : "核对确认：文件「\(result.finalTargetName)」已提交，空暂存目录待清理"
+                await loadCurrentDirectory(silent: true)
+            } else {
+                bannerMessage = "核对确认：目标「\(result.finalTargetName)」尚未提交，可重试清理暂存目录后重新上传"
+            }
         } catch {
             bannerMessage = error.localizedDescription
         }
@@ -740,7 +814,7 @@ public final class FileManagerViewModel: ObservableObject {
     public func clearFinishedTasks() async {
         let terminal: Set<ADBFileTaskState> = [.completed, .skipped, .cancelled, .failed]
         tasks.removeAll { terminal.contains($0.state) }
-        await fileService.clearFinishedTasks(sessionId: sessionSnapshot?.sessionId)
+        await fileService.clearFinishedTasks(serial: boundDevice.serial)
     }
 
     public func retryLedgerCleanup(id: UUID) async {

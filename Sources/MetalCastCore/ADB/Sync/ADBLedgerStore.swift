@@ -55,6 +55,13 @@ public actor ADBLedgerStore {
         try persist()
     }
 
+    public func updateFinalTargetName(id: UUID, finalTargetName: String) throws {
+        guard let idx = ledger.entries.firstIndex(where: { $0.id == id }) else { return }
+        ledger.entries[idx].finalTargetName = finalTargetName
+        ledger.entries[idx].updatedAt = Date()
+        try persist()
+    }
+
     public func remove(id: UUID) throws {
         let before = ledger.entries.count
         ledger.entries.removeAll { $0.id == id }

@@ -184,4 +184,68 @@ struct ADBPathAndBrowserTests {
         }
         #expect(fastEntries.map(\.displayName) == ["fresh.txt"])
     }
+
+    @Test("Switching directories cancels the previous active browsing task immediately")
+    func rapidSwitchCancelsPreviousBrowseTask() async throws {
+        actor SlowState {
+            var cancelledEarly = false
+            func markCancelled() { cancelledEarly = true }
+        }
+        let slowState = SlowState()
+
+        let server = try await MockADBTCPServer { conn in
+            Task {
+                defer { conn.close() }
+                guard try await conn.readHostRequest() == "host:transport-id:3" else { return }
+                try await conn.send(Data("OKAY".utf8))
+                guard try await conn.readHostRequest() == "sync:" else { return }
+                try await conn.send(Data("OKAY".utf8))
+
+                let tag = String(decoding: try await conn.readExact(4), as: UTF8.self)
+                let len = Int((try await conn.readExact(4)).readUInt32LE(at: 0))
+                let path = String(decoding: try await conn.readExact(len), as: UTF8.self)
+                #expect(tag == "LIS2")
+
+                if path.hasSuffix("/SlowDir") {
+                    do {
+                        // Cancelled client drops socket quickly so server hits EOF while waiting
+                        _ = try await conn.readExact(4)
+                    } catch {
+                        await slowState.markCancelled()
+                    }
+                } else {
+                    var resp = Self.makeDentV2Frame(name: "fresh.txt")
+                    resp.append(Self.makeDentV2Frame(tag: "DONE"))
+                    try await conn.send(resp)
+                    _ = try? await conn.readExact(8) // QUIT
+                }
+            }
+        }
+        defer { server.stop() }
+
+        let endpoint = try ADBServerEndpoint(host: "127.0.0.1", port: server.port)
+        let session = ADBFileSessionID(endpoint: endpoint, serverGeneration: 1, transportId: "3", serial: "s1")
+        let caps = ADBDeviceCapabilities(hasShellV2: true, hasStatV2: true, hasLsV2: true, commitMode: .mvNoClobberNoTarget)
+        let browser = ADBDirectoryBrowser()
+
+        let slowStream = browser.listDirectory(
+            sessionId: session,
+            physicalRoot: "/storage/emulated/0",
+            relativeComponents: [Data("SlowDir".utf8)],
+            capabilities: caps
+        )
+        try await Task.sleep(nanoseconds: 80_000_000)
+
+        let fastStream = browser.listDirectory(
+            sessionId: session,
+            physicalRoot: "/storage/emulated/0",
+            relativeComponents: [Data("FastDir".utf8)],
+            capabilities: caps
+        )
+        for try await _ in fastStream {}
+        for try await _ in slowStream {}
+        try await Task.sleep(nanoseconds: 80_000_000)
+
+        #expect(await slowState.cancelledEarly)
+    }
 }

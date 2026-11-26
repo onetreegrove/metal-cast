@@ -7,17 +7,20 @@ public final class ADBDirectoryBrowser: @unchecked Sendable {
     private let shellClient: ADBShellClient
     private let lock = NSLock()
     private var activeRequestIds: [ADBFileSessionID: UUID] = [:]
+    private var activeTasks: [ADBFileSessionID: Task<Void, Never>] = [:]
 
     public init(syncClient: ADBSyncClient = ADBSyncClient(), shellClient: ADBShellClient = ADBShellClient()) {
         self.syncClient = syncClient
         self.shellClient = shellClient
     }
 
-    /// Registers `requestId` as the latest active directory request for `sessionId`, invalidating prior ones.
+    /// Registers `requestId` as the latest active directory request for `sessionId`, cancelling any prior in-flight task.
     public func activateRequest(sessionId: ADBFileSessionID, requestId: UUID) {
         lock.lock()
         activeRequestIds[sessionId] = requestId
+        let previousTask = activeTasks.removeValue(forKey: sessionId)
         lock.unlock()
+        previousTask?.cancel()
     }
 
     public func isRequestCurrent(sessionId: ADBFileSessionID, requestId: UUID) -> Bool {
@@ -30,6 +33,28 @@ public final class ADBDirectoryBrowser: @unchecked Sendable {
     public func invalidateSession(_ sessionId: ADBFileSessionID) {
         lock.lock()
         activeRequestIds.removeValue(forKey: sessionId)
+        let previousTask = activeTasks.removeValue(forKey: sessionId)
+        lock.unlock()
+        previousTask?.cancel()
+    }
+
+    private func registerTask(_ task: Task<Void, Never>, sessionId: ADBFileSessionID, requestId: UUID) {
+        lock.lock()
+        let matches = activeRequestIds[sessionId] == requestId
+        if matches {
+            activeTasks[sessionId] = task
+        }
+        lock.unlock()
+        if !matches {
+            task.cancel()
+        }
+    }
+
+    private func clearTaskIfCurrent(sessionId: ADBFileSessionID, requestId: UUID) {
+        lock.lock()
+        if activeRequestIds[sessionId] == requestId {
+            activeTasks.removeValue(forKey: sessionId)
+        }
         lock.unlock()
     }
 
@@ -50,6 +75,9 @@ public final class ADBDirectoryBrowser: @unchecked Sendable {
 
         return AsyncThrowingStream { continuation in
             let task = Task {
+                defer {
+                    self.clearTaskIfCurrent(sessionId: sessionId, requestId: requestId)
+                }
                 do {
                     guard capabilities.hasShellV2 else {
                         throw ADBFileError.unsupportedDevice("缺少 shell_v2 能力")
@@ -148,6 +176,7 @@ public final class ADBDirectoryBrowser: @unchecked Sendable {
                 }
             }
 
+            self.registerTask(task, sessionId: sessionId, requestId: requestId)
             continuation.onTermination = { _ in
                 task.cancel()
             }

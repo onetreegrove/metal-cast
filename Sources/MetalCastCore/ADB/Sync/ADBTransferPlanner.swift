@@ -328,9 +328,13 @@ public enum ADBMacFilePublisher {
         partURL: URL,
         targetDirectory: URL,
         preferredName: String,
-        conflictResolution: ADBTransferConflictResolution
+        conflictResolution: ADBTransferConflictResolution,
+        originalBaseName: String? = nil
     ) throws -> URL? {
+        let baseName = originalBaseName ?? preferredName
         var candidateName = preferredName
+        var triedNormalized: Set<String> = [ADBTransferPlanner.normalizeMacAPFSName(candidateName)]
+        var conflictAttempts = 0
 
         while true {
             let destinationURL = targetDirectory.appendingPathComponent(candidateName)
@@ -346,14 +350,18 @@ public enum ADBMacFilePublisher {
                     try? FileManager.default.removeItem(at: partURL)
                     return nil
                 case .keepBoth:
+                    conflictAttempts += 1
+                    if conflictAttempts > ADBTransferPlanner.maxRenameAttempt {
+                        throw ADBFileError.invalidFileName("同名文件过多，已达到本地发布重命名上限")
+                    }
                     let existing = (try? FileManager.default.contentsOfDirectory(atPath: targetDirectory.path)) ?? []
-                    var occupied = Set(existing.map(ADBTransferPlanner.normalizeMacAPFSName))
-                    occupied.insert(ADBTransferPlanner.normalizeMacAPFSName(candidateName))
+                    let occupied = Set(existing.map(ADBTransferPlanner.normalizeMacAPFSName)).union(triedNormalized)
                     candidateName = try ADBTransferPlanner.nextAvailableRenameCandidate(
-                        originalName: preferredName,
+                        originalName: baseName,
                         occupiedNormalizedNames: occupied,
                         normalize: ADBTransferPlanner.normalizeMacAPFSName
                     )
+                    triedNormalized.insert(ADBTransferPlanner.normalizeMacAPFSName(candidateName))
                     continue
                 }
             }

@@ -70,6 +70,7 @@ public final class ADBSocketConnection: @unchecked Sendable {
     private var terminalError: Error?
     private var isReceiving = false
     private var isClosed = false
+    private var closedByCancellation = false
 
     private var pendingConnect: PendingOperation<Void>?
     private var pendingRead: PendingReadOperation?
@@ -94,6 +95,7 @@ public final class ADBSocketConnection: @unchecked Sendable {
             if didFinish {
                 lock.unlock()
                 timer.cancel()
+                timer.resume()
                 return
             }
             self.timer = timer
@@ -138,8 +140,9 @@ public final class ADBSocketConnection: @unchecked Sendable {
 
     private struct PendingReadOperation {
         let needed: Int
+        let allowCleanEOF: Bool
         let stage: String
-        let op: PendingOperation<Data>
+        let op: PendingOperation<Data?>
     }
 
     public init(endpoint: ADBServerEndpoint) {
@@ -147,7 +150,9 @@ public final class ADBSocketConnection: @unchecked Sendable {
     }
 
     deinit {
-        close()
+        connection?.stateUpdateHandler = nil
+        connection?.cancel()
+        connection = nil
     }
 
     /// Connects to `endpoint`, automatically coalescing `adb start-server` and retrying once on `ECONNREFUSED`.
@@ -244,6 +249,17 @@ public final class ADBSocketConnection: @unchecked Sendable {
                                 self.pendingRead = nil
                                 pendingR.op.fail(mapped)
                             }
+                            if !self.pendingWrites.isEmpty {
+                                let writes = self.pendingWrites
+                                self.pendingWrites.removeAll()
+                                for w in writes {
+                                    w.fail(mapped)
+                                }
+                            }
+                            self.isClosed = true
+                            self.connection?.stateUpdateHandler = nil
+                            self.connection?.cancel()
+                            self.connection = nil
                         case .cancelled:
                             if let pending = self.pendingConnect {
                                 self.pendingConnect = nil
@@ -264,7 +280,7 @@ public final class ADBSocketConnection: @unchecked Sendable {
                     self.pendingConnect = nil
                     pending.fail(CancellationError())
                 }
-                self.closeLocked()
+                self.closeLocked(cancelled: true)
             }
         }
     }
@@ -275,9 +291,12 @@ public final class ADBSocketConnection: @unchecked Sendable {
         }
     }
 
-    private func closeLocked() {
+    private func closeLocked(cancelled: Bool = false) {
         guard !isClosed else { return }
         isClosed = true
+        if cancelled {
+            closedByCancellation = true
+        }
 
         if let pending = pendingConnect {
             pendingConnect = nil
@@ -318,7 +337,10 @@ public final class ADBSocketConnection: @unchecked Sendable {
                         return
                     }
                     guard !self.isClosed, let conn = self.connection else {
-                        op.fail(ADBFileError.protocolError(stage: stage, detail: "Socket 已关闭"))
+                        let err: Error = self.closedByCancellation
+                            ? CancellationError()
+                            : ADBFileError.protocolError(stage: stage, detail: "Socket 已关闭")
+                        op.fail(err)
                         return
                     }
 
@@ -351,7 +373,7 @@ public final class ADBSocketConnection: @unchecked Sendable {
                 for w in writes {
                     w.fail(CancellationError())
                 }
-                self.closeLocked()
+                self.closeLocked(cancelled: true)
             }
         }
     }
@@ -361,6 +383,28 @@ public final class ADBSocketConnection: @unchecked Sendable {
         timeout: TimeInterval? = defaultHandshakeTimeout,
         stage: String = "read"
     ) async throws -> Data {
+        guard let data = try await readExactInternal(count, allowCleanEOF: false, timeout: timeout, stage: stage) else {
+            throw ADBFileError.protocolError(stage: stage, detail: "连接提前断开")
+        }
+        return data
+    }
+
+    /// Reads `count` bytes or returns `nil` if the stream hits clean EOF with 0 buffered bytes remaining.
+    /// Partial EOF (`0 < buffered < count`) still throws `ADBFileError.protocolError`.
+    public func readExactOrEOF(
+        _ count: Int,
+        timeout: TimeInterval? = defaultHandshakeTimeout,
+        stage: String = "read"
+    ) async throws -> Data? {
+        try await readExactInternal(count, allowCleanEOF: true, timeout: timeout, stage: stage)
+    }
+
+    private func readExactInternal(
+        _ count: Int,
+        allowCleanEOF: Bool,
+        timeout: TimeInterval?,
+        stage: String
+    ) async throws -> Data? {
         try Task.checkCancellation()
         guard count >= 0 else {
             throw ADBFileError.protocolError(stage: stage, detail: "非法读取长度: \(count)")
@@ -368,11 +412,15 @@ public final class ADBSocketConnection: @unchecked Sendable {
         if count == 0 { return Data() }
 
         return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
-                let op = PendingOperation<Data>(continuation: continuation)
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+                let op = PendingOperation<Data?>(continuation: continuation)
 
                 queue.async { [weak self] in
                     guard let self else {
+                        op.fail(CancellationError())
+                        return
+                    }
+                    if self.closedByCancellation {
                         op.fail(CancellationError())
                         return
                     }
@@ -387,14 +435,21 @@ public final class ADBSocketConnection: @unchecked Sendable {
                         return
                     }
                     if self.isEOF {
-                        op.fail(ADBFileError.protocolError(
-                            stage: stage,
-                            detail: "连接提前断开（期望 \(count) 字节，实际仅收到 \(self.readBuffer.count) 字节）"
-                        ))
+                        if allowCleanEOF && self.readBuffer.isEmpty {
+                            op.succeed(nil)
+                        } else {
+                            op.fail(ADBFileError.protocolError(
+                                stage: stage,
+                                detail: "连接提前断开（期望 \(count) 字节，实际仅收到 \(self.readBuffer.count) 字节）"
+                            ))
+                        }
                         return
                     }
                     guard !self.isClosed, self.connection != nil else {
-                        op.fail(ADBFileError.protocolError(stage: stage, detail: "Socket 已关闭"))
+                        let err: Error = self.closedByCancellation
+                            ? CancellationError()
+                            : ADBFileError.protocolError(stage: stage, detail: "Socket 已关闭")
+                        op.fail(err)
                         return
                     }
                     guard self.pendingRead == nil else {
@@ -402,7 +457,12 @@ public final class ADBSocketConnection: @unchecked Sendable {
                         return
                     }
 
-                    self.pendingRead = PendingReadOperation(needed: count, stage: stage, op: op)
+                    self.pendingRead = PendingReadOperation(
+                        needed: count,
+                        allowCleanEOF: allowCleanEOF,
+                        stage: stage,
+                        op: op
+                    )
                     op.installTimer(timeout: timeout, queue: self.queue) { [weak self] in
                         guard let self else { return }
                         if op.fail(ADBFileError.protocolError(stage: stage, detail: "读取超时")) {
@@ -421,7 +481,7 @@ public final class ADBSocketConnection: @unchecked Sendable {
                     self.pendingRead = nil
                     pendingR.op.fail(CancellationError())
                 }
-                self.closeLocked()
+                self.closeLocked(cancelled: true)
             }
         }
     }
@@ -473,10 +533,14 @@ public final class ADBSocketConnection: @unchecked Sendable {
 
         if isEOF {
             pendingRead = nil
-            pending.op.fail(ADBFileError.protocolError(
-                stage: pending.stage,
-                detail: "连接意外关闭（期望 \(pending.needed) 字节，实际仅收到 \(readBuffer.count) 字节）"
-            ))
+            if pending.allowCleanEOF && readBuffer.isEmpty {
+                pending.op.succeed(nil)
+            } else {
+                pending.op.fail(ADBFileError.protocolError(
+                    stage: pending.stage,
+                    detail: "连接意外关闭（期望 \(pending.needed) 字节，实际仅收到 \(readBuffer.count) 字节）"
+                ))
+            }
             return
         }
 

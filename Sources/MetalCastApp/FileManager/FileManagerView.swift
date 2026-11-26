@@ -176,15 +176,18 @@ public struct FileManagerView: View {
     }
 
     private var activeCapabilityNotices: String? {
-        guard let caps = viewModel.sessionSnapshot?.capabilities else { return nil }
+        guard let snap = viewModel.sessionSnapshot else { return nil }
+        let caps = snap.capabilities
         var parts: [String] = []
         if !caps.hasStatV2 || !caps.hasLsV2 {
             parts.append("当前设备使用 v1 元数据（大小显示为 —，下载跳过长度校验）")
         }
-        if caps.commitMode == .mvNoClobberWithGuard {
-            parts.append("旧版 Toybox 不支持 mv -nT，已降级为 mv -n 护栏提交")
-        } else if caps.commitMode == .unsupported {
-            parts.append("设备缺少 mv -n，已禁用上传（浏览/下载/删除可正常使用）")
+        if snap.commitModeProbed {
+            if caps.commitMode == .mvNoClobberWithGuard {
+                parts.append("旧版 Toybox 不支持 mv -nT，已降级为 mv -n 护栏提交")
+            } else if caps.commitMode == .unsupported {
+                parts.append("设备缺少 mv -n，已禁用上传（浏览/下载/删除可正常使用）")
+            }
         }
         return parts.isEmpty ? nil : parts.joined(separator: "；")
     }
@@ -609,10 +612,17 @@ public struct FileManagerView: View {
                                     .foregroundColor(.secondary)
                             }
                             Spacer()
-                            Button("重试清理") {
-                                Task { await viewModel.retryLedgerCleanup(id: entry.id) }
+                            if entry.state == .pendingConfirmation {
+                                Button("核对结果") {
+                                    Task { await viewModel.verifyPendingLedgerEntry(id: entry.id) }
+                                }
+                                .controlSize(.small)
+                            } else {
+                                Button("重试清理") {
+                                    Task { await viewModel.retryLedgerCleanup(id: entry.id) }
+                                }
+                                .controlSize(.small)
                             }
-                            .controlSize(.small)
                             Button("忽略并移除") {
                                 Task { await viewModel.dismissLedgerEntry(id: entry.id) }
                             }
@@ -636,10 +646,16 @@ public struct FileManagerView: View {
                 .font(.caption2.monospacedDigit())
                 .foregroundColor(.secondary)
             Spacer()
-            if let caps = viewModel.sessionSnapshot?.capabilities {
-                let mvText = caps.commitMode == .mvNoClobberNoTarget
-                    ? "mv -nT"
-                    : (caps.commitMode == .mvNoClobberWithGuard ? "mv -n" : "无 mv -n")
+            if let snap = viewModel.sessionSnapshot {
+                let caps = snap.capabilities
+                let mvText: String = {
+                    guard snap.commitModeProbed else { return "mv 待探测" }
+                    switch caps.commitMode {
+                    case .mvNoClobberNoTarget: return "mv -nT"
+                    case .mvNoClobberWithGuard: return "mv -n"
+                    case .unsupported: return "无 mv -n"
+                    }
+                }()
                 Text("\(caps.hasShellV2 ? "shell_v2" : "无 shell_v2") · \(caps.hasStatV2 ? "stat_v2" : "STAT v1") · \(caps.hasLsV2 ? "ls_v2" : "LIST v1") · \(mvText)")
                     .font(.caption2)
                     .foregroundColor(.secondary)
@@ -737,12 +753,17 @@ private struct BatchConflictSheet: View {
                                     .lineLimit(1)
                                 Spacer()
                                 if !sheet.applyAll {
-                                    Picker("", selection: $row.resolution) {
-                                        Text("保留两份").tag(ADBTransferConflictResolution.keepBoth)
-                                            .disabled(row.suggestedRename == nil)
-                                        Text("跳过").tag(ADBTransferConflictResolution.skip)
+                                    if row.suggestedRename != nil {
+                                        Picker("", selection: $row.resolution) {
+                                            Text("保留两份").tag(ADBTransferConflictResolution.keepBoth)
+                                            Text("跳过").tag(ADBTransferConflictResolution.skip)
+                                        }
+                                        .frame(width: 110)
+                                    } else {
+                                        Text("仅可跳过")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
                                     }
-                                    .frame(width: 110)
                                 }
                             }
                             if let err = row.renameError {
