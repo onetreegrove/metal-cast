@@ -11,6 +11,7 @@ public final class SessionManager: ObservableObject {
     @Published public var selectedDevice: ADBDevice?
     @Published public var discoveredWirelessDevices: [DiscoveredWirelessDevice] = []
     @Published public var isScanningWireless = false
+    @Published public var isSwitchingWireless = false
     @Published public var isRunning = false
     @Published public var statusMessage = "就绪"
 
@@ -77,7 +78,7 @@ public final class SessionManager: ObservableObject {
         }
     }
 
-    public func refreshDevices() async {
+    public func refreshDevices(updateStatusMessage: Bool = true) async {
         await startDeviceTrackingIfNeeded()
         do {
             let list: [ADBDevice]
@@ -87,9 +88,13 @@ public final class SessionManager: ObservableObject {
                 list = try await ADBManager.shared.getDevices()
             }
             applyDeviceList(list)
-            self.statusMessage = "扫描完成: 发现 \(list.count) 台设备"
+            if updateStatusMessage {
+                self.statusMessage = "扫描完成: 发现 \(list.count) 台设备"
+            }
         } catch {
-            self.statusMessage = "扫描设备失败: \(error.localizedDescription)"
+            if updateStatusMessage {
+                self.statusMessage = "扫描设备失败: \(error.localizedDescription)"
+            }
         }
         await scanWirelessDevices()
     }
@@ -123,14 +128,16 @@ public final class SessionManager: ObservableObject {
             statusMessage = "正在通过 Wi-Fi 连接 \(ip):\(port) ..."
             let success = try await ADBManager.shared.connectWifi(ip: ip, port: port)
             if success {
+                await refreshDevices(updateStatusMessage: false)
                 statusMessage = "Wi-Fi 连接成功: \(ip):\(port)"
-                await refreshDevices()
                 return true
             } else {
+                await refreshDevices(updateStatusMessage: false)
                 statusMessage = "Wi-Fi 连接未响应，请检查手机 IP 与端口"
                 return false
             }
         } catch {
+            await refreshDevices(updateStatusMessage: false)
             statusMessage = "Wi-Fi 连接失败: \(error.localizedDescription)"
             return false
         }
@@ -141,8 +148,8 @@ public final class SessionManager: ObservableObject {
         do {
             let res = try await ADBManager.shared.pairDevice(address: address, code: code)
             if res.success {
+                await refreshDevices(updateStatusMessage: false)
                 statusMessage = "🎉 配对成功: \(address)"
-                await refreshDevices()
                 return true
             } else {
                 statusMessage = "配对失败: \(res.message)"
@@ -160,13 +167,25 @@ public final class SessionManager: ObservableObject {
     }
 
     public func switchSelectedDeviceToWireless() async {
+        guard !isSwitchingWireless else { return }
         guard let device = selectedDevice, !device.isWifi else { return }
+
+        isSwitchingWireless = true
+        defer { isSwitchingWireless = false }
+
         statusMessage = "正在为 \(device.model ?? device.serial) 切换无线免插线模式..."
         do {
             let ip = try await ADBManager.shared.switchToWireless(serial: device.serial)
-            statusMessage = "🎉 成功切换为无线投屏模式 (\(ip):5555)！现在可以拔下 USB 数据线。"
-            await refreshDevices()
+            await refreshDevices(updateStatusMessage: false)
+            let wifiSerial = "\(ip):5555"
+            if let wifiDevice = devices.first(where: { $0.serial == wifiSerial && $0.state == .device }) {
+                selectedDevice = wifiDevice
+            }
+            statusMessage = "🎉 成功切换为无线投屏模式 (\(wifiSerial))！现在可以拔下 USB 数据线。"
+        } catch is CancellationError {
+            statusMessage = "已取消切换无线模式"
         } catch {
+            await refreshDevices(updateStatusMessage: false)
             statusMessage = "切换无线模式失败: \(error.localizedDescription)"
         }
     }
@@ -342,30 +361,46 @@ public final class SessionManager: ObservableObject {
 
     public func stopMirroring(finalStatus: String = "已断开连接") {
         guard isRunning else { return }
+        isRunning = false
         print("🛑 [Session] 正在停止投屏会话...")
 
-        audioPlayer?.stop()
+        audioPlayer?.stopAsync()
         audioPlayer = nil
 
         ClipboardManager.shared.stopMonitoring()
+
+        currentParser?.onFormatDescription = nil
+        currentParser?.onSampleBuffer = nil
+        currentParser = nil
+
+        currentDecoder?.invalidateAsync()
+        currentDecoder = nil
+
         activeConnection?.stop()
         activeConnection = nil
 
-        activeProcess?.terminate()
+        let processToTerminate = activeProcess
         activeProcess = nil
+        if let processToTerminate, processToTerminate.isRunning {
+            processToTerminate.terminate()
+        }
 
         if let serial = currentSerial, let socket = currentSocketName {
+            currentSerial = nil
+            currentSocketName = nil
             Task {
                 try? await ADBManager.shared.removeReverse(serial: serial, remoteSocket: socket)
             }
         }
 
-        mirrorWindowController?.close()
-        mirrorWindowController = nil
-        currentParser = nil
-        currentDecoder = nil
+        if let winController = mirrorWindowController {
+            mirrorWindowController = nil
+            winController.teardown()
+            if winController.window?.isVisible == true {
+                winController.close()
+            }
+        }
 
-        isRunning = false
         statusMessage = finalStatus
     }
 }

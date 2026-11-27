@@ -3,15 +3,40 @@ import Foundation
 public actor ADBManager {
     public static let shared = ADBManager()
 
+    public static let defaultCommandTimeout: TimeInterval = 5.0
+    public static let tcpipCommandTimeout: TimeInterval = 8.0
+    public static let wifiConnectTimeout: TimeInterval = 5.0
+    public static let wifiSwitchConnectTimeout: TimeInterval = 4.0
+    public static let wifiPairTimeout: TimeInterval = 15.0
+
     private let runner: ADBProcessRunner
 
     public init(runner: ADBProcessRunner = .shared) {
         self.runner = runner
     }
 
+    private func runCommand(
+        args: [String],
+        timeout: TimeInterval,
+        timeoutMessage: String
+    ) async throws -> (exitCode: Int32, stdout: String, stderr: String) {
+        do {
+            return try await runner.run(args: args, timeout: timeout)
+        } catch let error as ADBFileError {
+            if case .adbServerStartFailed(let detail) = error, detail.contains("超时") {
+                throw ADBError.commandFailed(timeoutMessage)
+            }
+            throw error
+        }
+    }
+
     /// Queries connected ADB devices with detailed properties
     public func getDevices() async throws -> [ADBDevice] {
-        let result = try await runner.run(args: ["devices", "-l"])
+        let result = try await runCommand(
+            args: ["devices", "-l"],
+            timeout: Self.defaultCommandTimeout,
+            timeoutMessage: "获取设备列表超时"
+        )
         guard result.exitCode == 0 else {
             throw ADBError.commandFailed(result.stderr)
         }
@@ -30,11 +55,15 @@ public actor ADBManager {
 
     /// Sets up adb reverse tunnel (e.g. localabstract:scrcpy -> tcp:27183)
     public func reverse(serial: String, remoteSocket: String, localPort: UInt16) async throws {
-        let result = try await runner.run(args: [
-            "-s", serial, "reverse",
-            "localabstract:\(remoteSocket)",
-            "tcp:\(localPort)"
-        ])
+        let result = try await runCommand(
+            args: [
+                "-s", serial, "reverse",
+                "localabstract:\(remoteSocket)",
+                "tcp:\(localPort)"
+            ],
+            timeout: Self.defaultCommandTimeout,
+            timeoutMessage: "建立 ADB 反向代理超时"
+        )
         guard result.exitCode == 0 else {
             throw ADBError.reverseFailed(result.stderr)
         }
@@ -42,19 +71,27 @@ public actor ADBManager {
 
     /// Removes adb reverse tunnel
     public func removeReverse(serial: String, remoteSocket: String) async throws {
-        _ = try await runner.run(args: [
-            "-s", serial, "reverse", "--remove",
-            "localabstract:\(remoteSocket)"
-        ])
+        _ = try await runCommand(
+            args: [
+                "-s", serial, "reverse", "--remove",
+                "localabstract:\(remoteSocket)"
+            ],
+            timeout: Self.defaultCommandTimeout,
+            timeoutMessage: "移除 ADB 反向代理超时"
+        )
     }
 
     /// Sets up adb forward tunnel
     public func forward(serial: String, localPort: UInt16, remoteSocket: String) async throws {
-        let result = try await runner.run(args: [
-            "-s", serial, "forward",
-            "tcp:\(localPort)",
-            "localabstract:\(remoteSocket)"
-        ])
+        let result = try await runCommand(
+            args: [
+                "-s", serial, "forward",
+                "tcp:\(localPort)",
+                "localabstract:\(remoteSocket)"
+            ],
+            timeout: Self.defaultCommandTimeout,
+            timeoutMessage: "建立 ADB 端口转发超时"
+        )
         guard result.exitCode == 0 else {
             throw ADBError.forwardFailed(result.stderr)
         }
@@ -62,28 +99,83 @@ public actor ADBManager {
 
     /// Removes adb forward tunnel
     public func removeForward(serial: String, localPort: UInt16) async throws {
-        _ = try await runner.run(args: [
-            "-s", serial, "forward", "--remove",
-            "tcp:\(localPort)"
-        ])
+        _ = try await runCommand(
+            args: [
+                "-s", serial, "forward", "--remove",
+                "tcp:\(localPort)"
+            ],
+            timeout: Self.defaultCommandTimeout,
+            timeoutMessage: "移除 ADB 端口转发超时"
+        )
     }
 
     /// Connects to a device via Wi-Fi IP and Port
-    public func connectWifi(ip: String, port: Int = 5555) async throws -> Bool {
+    public func connectWifi(
+        ip: String,
+        port: Int = 5555,
+        timeout: TimeInterval = ADBManager.wifiConnectTimeout
+    ) async throws -> Bool {
         let target = "\(ip):\(port)"
-        let result = try await runner.run(args: ["connect", target])
-        return result.exitCode == 0 && result.stdout.contains("connected")
+
+        // Clear any stale offline/unauthorized transport first so `adb connect` does not short-circuit
+        // with "already connected to <target>" on a dead transport.
+        if let existing = (try? await getDevices())?.first(where: { $0.serial == target }) {
+            if existing.state == .device {
+                return true
+            }
+            try? await disconnectWifi(ip: ip, port: port)
+        }
+
+        let result: (exitCode: Int32, stdout: String, stderr: String)
+        do {
+            result = try await runCommand(
+                args: ["connect", target],
+                timeout: timeout,
+                timeoutMessage: "连接 \(target) 超时，请确认手机与 Mac 处于同一 Wi-Fi 局域网且未被 VPN/代理隔离"
+            )
+        } catch {
+            // `adb connect` leaves a zombie `offline` transport in the server if killed mid-handshake.
+            try? await disconnectWifi(ip: ip, port: port)
+            throw error
+        }
+
+        let combined = "\(result.stdout)\n\(result.stderr)"
+        guard result.exitCode == 0, combined.contains("connected") else {
+            return false
+        }
+
+        if let matched = (try? await getDevices())?.first(where: { $0.serial == target }) {
+            switch matched.state {
+            case .device:
+                return true
+            case .unauthorized:
+                throw ADBError.commandFailed("无线设备 \(target) 尚未授权调试，请在手机上点击「允许调试」")
+            default:
+                try? await disconnectWifi(ip: ip, port: port)
+                return false
+            }
+        }
+
+        return false
     }
 
     /// Disconnects a Wi-Fi device
     public func disconnectWifi(ip: String, port: Int = 5555) async throws {
         let target = "\(ip):\(port)"
-        _ = try await runner.run(args: ["disconnect", target])
+        _ = try await runCommand(
+            args: ["disconnect", target],
+            timeout: 3.0,
+            timeoutMessage: "断开无线设备 \(target) 超时"
+        )
     }
 
     /// Discovers nearby wireless ADB devices via mDNS services
     public func getMdnsServices() async throws -> [DiscoveredWirelessDevice] {
-        let result = try await runner.run(args: ["mdns", "services"])
+        let result = try await runCommand(
+            args: ["mdns", "services"],
+            timeout: Self.defaultCommandTimeout,
+            timeoutMessage: "扫描局域网无线调试广播超时"
+        )
         guard result.exitCode == 0 else { return [] }
 
         var list: [DiscoveredWirelessDevice] = []
@@ -111,7 +203,11 @@ public actor ADBManager {
 
     /// Pairs with an Android 11+ wireless debugging device using a 6-digit code
     public func pairDevice(address: String, code: String) async throws -> (success: Bool, message: String) {
-        let result = try await runner.run(args: ["pair", address, code])
+        let result = try await runCommand(
+            args: ["pair", address, code],
+            timeout: Self.wifiPairTimeout,
+            timeoutMessage: "无线配对超时，请检查配对地址与 6 位配对码是否有效"
+        )
         let output = result.stdout.isEmpty ? result.stderr : result.stdout
         let isSuccess = result.exitCode == 0 && output.contains("Successfully paired")
         return (isSuccess, output.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -119,14 +215,22 @@ public actor ADBManager {
 
     /// Enables TCP/IP debugging on a currently connected USB device
     public func enableTcpip(serial: String, port: Int = 5555) async throws -> Bool {
-        let result = try await runner.run(args: ["-s", serial, "tcpip", "\(port)"])
+        let result = try await runCommand(
+            args: ["-s", serial, "tcpip", "\(port)"],
+            timeout: Self.tcpipCommandTimeout,
+            timeoutMessage: "开启设备 tcpip \(port) 超时，请检查 USB 连接与调试授权"
+        )
         return result.exitCode == 0
     }
 
     /// Retrieves the device's local Wi-Fi IPv4 address
     public func getDeviceWifiIP(serial: String) async throws -> String? {
         // Try method 1: ip -f inet addr show wlan0
-        let res1 = try await runner.run(args: ["-s", serial, "shell", "ip -f inet addr show wlan0"])
+        let res1 = try await runCommand(
+            args: ["-s", serial, "shell", "ip -f inet addr show wlan0"],
+            timeout: Self.defaultCommandTimeout,
+            timeoutMessage: "获取手机 Wi-Fi IP 超时，请检查 USB 连接状态"
+        )
         if res1.exitCode == 0 {
             let pattern = #"inet\s+(\d+\.\d+\.\d+\.\d+)"#
             if let regex = try? NSRegularExpression(pattern: pattern),
@@ -137,14 +241,22 @@ public actor ADBManager {
         }
 
         // Try method 2: getprop dhcp.wlan0.ipaddress
-        let res2 = try await runner.run(args: ["-s", serial, "shell", "getprop dhcp.wlan0.ipaddress"])
+        let res2 = try await runCommand(
+            args: ["-s", serial, "shell", "getprop dhcp.wlan0.ipaddress"],
+            timeout: Self.defaultCommandTimeout,
+            timeoutMessage: "获取手机 Wi-Fi IP 超时，请检查 USB 连接状态"
+        )
         let ip2 = res2.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         if !ip2.isEmpty && ip2.contains(".") {
             return ip2
         }
 
         // Try method 3: ip route
-        let res3 = try await runner.run(args: ["-s", serial, "shell", "ip route"])
+        let res3 = try await runCommand(
+            args: ["-s", serial, "shell", "ip route"],
+            timeout: Self.defaultCommandTimeout,
+            timeoutMessage: "获取手机 Wi-Fi IP 超时，请检查 USB 连接状态"
+        )
         let pattern3 = #"src\s+(\d+\.\d+\.\d+\.\d+)"#
         if let regex = try? NSRegularExpression(pattern: pattern3),
            let match = regex.firstMatch(in: res3.stdout, range: NSRange(res3.stdout.startIndex..., in: res3.stdout)),
@@ -166,19 +278,32 @@ public actor ADBManager {
             throw NSError(domain: "MetalCast", code: -2, userInfo: [NSLocalizedDescriptionKey: "执行 adb tcpip \(port) 失败，请确保 USB 调试已授权"])
         }
 
-        // Wait for ADB daemon on device to restart in TCP mode (with retry)
+        // Wait for ADB daemon on device to restart in TCP mode (with bounded timeout & retry)
         var connected = false
+        var lastError: Error?
         for attempt in 1...3 {
-            try await Task.sleep(nanoseconds: 1_000_000_000)
-            if (try? await connectWifi(ip: ip, port: port)) == true {
-                connected = true
-                break
-            }
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: attempt == 1 ? 1_200_000_000 : 1_000_000_000)
+            try Task.checkCancellation()
+
             print("🔄 [ADBManager] 尝试连接无线设备 \(ip):\(port) (第 \(attempt)/3 次)...")
+            do {
+                if try await connectWifi(ip: ip, port: port, timeout: Self.wifiSwitchConnectTimeout) {
+                    connected = true
+                    break
+                }
+            } catch is CancellationError {
+                try? await disconnectWifi(ip: ip, port: port)
+                throw CancellationError()
+            } catch {
+                lastError = error
+            }
         }
 
         guard connected else {
-            throw NSError(domain: "MetalCast", code: -3, userInfo: [NSLocalizedDescriptionKey: "无法连接无线设备 \(ip):\(port)，请检查手机是否与 Mac 处于同一 Wi-Fi 子网并允许无线访问"])
+            try? await disconnectWifi(ip: ip, port: port)
+            let detail = lastError.map { "（\($0.localizedDescription)）" } ?? ""
+            throw NSError(domain: "MetalCast", code: -3, userInfo: [NSLocalizedDescriptionKey: "无法连接无线设备 \(ip):\(port)\(detail)，请检查手机是否与 Mac 处于同一 Wi-Fi 子网并允许无线访问"])
         }
 
         return ip

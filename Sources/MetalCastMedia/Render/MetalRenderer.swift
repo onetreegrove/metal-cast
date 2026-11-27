@@ -138,6 +138,16 @@ public final class MetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable
         return latestPixelBuffer
     }
 
+    /// Releases any retained frame and flushes texture cache on teardown.
+    public func clear() {
+        lock.lock()
+        latestPixelBuffer = nil
+        if let cache = textureCache {
+            CVMetalTextureCacheFlush(cache, 0)
+        }
+        lock.unlock()
+    }
+
     public func draw(in view: MTKView) {
         lock.lock()
         guard let pixelBuffer = latestPixelBuffer else {

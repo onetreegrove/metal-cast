@@ -292,7 +292,7 @@ public final class ScrcpyConnection: @unchecked Sendable {
             self?.controlBuffer.removeAll()
             self?.isHeaderReceived = false
             self?.isAudioHeaderReceived = false
-            self?.hasDisconnected = false
+            self?.hasDisconnected = true
             self?.onVideoData = nil
             self?.onAudioData = nil
             self?.onDeviceName = nil

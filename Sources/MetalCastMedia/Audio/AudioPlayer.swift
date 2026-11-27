@@ -4,6 +4,7 @@ import AudioToolbox
 public final class AudioPlayer: @unchecked Sendable {
     private var audioQueue: AudioQueueRef?
     private var isRunning = false
+    private var isStopped = false
     private let lock = NSLock()
     private var bufferPool: [AudioQueueBufferRef] = []
     private let bufferSize: UInt32 = 32768 // 32KB per buffer
@@ -71,20 +72,28 @@ public final class AudioPlayer: @unchecked Sendable {
 
     private func handleBufferCompleted(buffer: AudioQueueBufferRef) {
         lock.lock()
-        defer { lock.unlock() }
+        guard !isStopped, let queue = audioQueue else {
+            lock.unlock()
+            return
+        }
 
         if bufferPool.count < 12 {
             bufferPool.append(buffer)
-        } else if let queue = audioQueue {
+            lock.unlock()
+        } else {
+            lock.unlock()
             AudioQueueFreeBuffer(queue, buffer)
         }
     }
 
     private func updateVolume() {
         lock.lock()
-        defer { lock.unlock() }
-        guard let queue = audioQueue else { return }
+        guard !isStopped, let queue = audioQueue else {
+            lock.unlock()
+            return
+        }
         let effectiveVol: Float = isMuted ? 0.0 : max(0.0, min(1.0, volume))
+        lock.unlock()
         AudioQueueSetParameter(queue, kAudioQueueParam_Volume, effectiveVol)
     }
 
@@ -94,7 +103,7 @@ public final class AudioPlayer: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        guard let queue = audioQueue else { return }
+        guard !isStopped, let queue = audioQueue else { return }
 
         let buffer: AudioQueueBufferRef
         if let pooled = bufferPool.popLast() {
@@ -132,7 +141,7 @@ public final class AudioPlayer: @unchecked Sendable {
     public func start() {
         lock.lock()
         defer { lock.unlock() }
-        guard let queue = audioQueue, !isRunning else { return }
+        guard !isStopped, let queue = audioQueue, !isRunning else { return }
         AudioQueueStart(queue, nil)
         isRunning = true
     }
@@ -140,21 +149,40 @@ public final class AudioPlayer: @unchecked Sendable {
     public func pause() {
         lock.lock()
         defer { lock.unlock() }
-        guard let queue = audioQueue, isRunning else { return }
+        guard !isStopped, let queue = audioQueue, isRunning else { return }
         AudioQueuePause(queue)
         isRunning = false
     }
 
     public func stop() {
-        lock.lock()
-        defer { lock.unlock() }
+        let queue = beginStop()
 
-        if let queue = audioQueue {
+        // Stop and dispose outside `lock` so AudioQueueStop(true) waiting on
+        // AudioQueueOutputCallback cannot deadlock with handleBufferCompleted.
+        if let queue {
             AudioQueueStop(queue, true)
             AudioQueueDispose(queue, true)
-            audioQueue = nil
         }
-        bufferPool.removeAll()
+    }
+
+    /// Marks the player stopped immediately and tears down the underlying AudioQueue off the caller's thread.
+    public func stopAsync() {
+        guard let queue = beginStop() else { return }
+        DispatchQueue.global(qos: .utility).async { [self] in
+            AudioQueueStop(queue, true)
+            AudioQueueDispose(queue, true)
+            _ = self
+        }
+    }
+
+    private func beginStop() -> AudioQueueRef? {
+        lock.lock()
+        let queue = audioQueue
+        audioQueue = nil
+        isStopped = true
         isRunning = false
+        bufferPool.removeAll()
+        lock.unlock()
+        return queue
     }
 }

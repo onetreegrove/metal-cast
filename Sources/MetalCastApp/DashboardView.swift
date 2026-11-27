@@ -54,7 +54,12 @@ public struct DashboardView: View {
             }
         }
         .sheet(isPresented: $showingWirelessSheet) {
-            WirelessConnectSheet(session: session)
+            if #available(macOS 13.3, *) {
+                WirelessConnectSheet(session: session)
+                    .presentationBackground(MCTheme.cardSurface)
+            } else {
+                WirelessConnectSheet(session: session)
+            }
         }
     }
 
@@ -283,12 +288,21 @@ public struct DashboardView: View {
                 Button(action: {
                     Task { await session.switchSelectedDeviceToWireless() }
                 }) {
-                    Label("一键切无线", systemImage: "bolt.fill")
-                        .lineLimit(1)
+                    if session.isSwitchingWireless {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("切换无线中…")
+                                .lineLimit(1)
+                        }
+                    } else {
+                        Label("一键切无线", systemImage: "bolt.fill")
+                            .lineLimit(1)
+                    }
                 }
                 .buttonStyle(MCButtonStyle(.secondary))
                 .fixedSize()
-                .disabled(device.state != .device)
+                .disabled(device.state != .device || session.isSwitchingWireless)
                 .help("自动开启 tcpip 5555 并连入无线，之后可安全拔下 USB 线")
             }
 
@@ -966,9 +980,18 @@ private struct WirelessTriggerButton: View {
 
 // MARK: - Unified Wireless Discovery + Manual IP Sheet
 
+private struct WirelessSheetBodyHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 private struct WirelessConnectSheet: View {
     @ObservedObject var session: SessionManager
     @Environment(\.dismiss) private var dismiss
+
+    private let maxBodyHeight: CGFloat = 460
 
     @State private var wifiIpInput = ""
     @State private var wifiPortInput = "5555"
@@ -978,6 +1001,7 @@ private struct WirelessConnectSheet: View {
     @State private var isConnecting = false
     @State private var feedbackMessage: String?
     @State private var feedbackIsError = false
+    @State private var measuredBodyHeight: CGFloat = 0
 
     private var isManualIpValid: Bool {
         let trimmed = wifiIpInput.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1018,16 +1042,22 @@ private struct WirelessConnectSheet: View {
                 .fill(MCTheme.borderSubtle)
                 .frame(height: 1)
 
-            ViewThatFits(in: .vertical) {
-                sheetBodyContent
-                    .fixedSize(horizontal: false, vertical: true)
-
-                ScrollView {
-                    sheetBodyContent
+            Group {
+                if measuredBodyHeight > maxBodyHeight || session.discoveredWirelessDevices.count > 2 {
+                    ScrollView {
+                        measuredSheetBodyContent
+                    }
+                    .frame(height: maxBodyHeight)
+                } else {
+                    measuredSheetBodyContent
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .frame(height: 460)
             }
-            .frame(maxHeight: 460)
+            .onPreferenceChange(WirelessSheetBodyHeightKey.self) { height in
+                if abs(measuredBodyHeight - height) > 0.5 {
+                    measuredBodyHeight = height
+                }
+            }
 
             Rectangle()
                 .fill(MCTheme.borderSubtle)
@@ -1044,8 +1074,9 @@ private struct WirelessConnectSheet: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
         }
-        .background(MCTheme.cardSurface)
         .frame(width: 540)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(MCTheme.cardSurface)
         .onAppear {
             if session.discoveredWirelessDevices.isEmpty {
                 Task { await session.scanWirelessDevices() }
@@ -1057,6 +1088,15 @@ private struct WirelessConnectSheet: View {
                 pairCodeInput = ""
             }
         }
+    }
+
+    private var measuredSheetBodyContent: some View {
+        sheetBodyContent
+            .background(
+                GeometryReader { geo in
+                    Color.clear.preference(key: WirelessSheetBodyHeightKey.self, value: geo.size.height)
+                }
+            )
     }
 
     private var sheetBodyContent: some View {

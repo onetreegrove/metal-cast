@@ -19,6 +19,7 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
     private var activeConstraints: [NSLayoutConstraint] = []
     private var keyMonitor: Any?
     private var appResignObserver: Any?
+    private var isTornDown = false
 
     private let rightToolbarWidth: CGFloat = 44
     private let bottomToolbarHeight: CGFloat = 40
@@ -299,9 +300,29 @@ public final class MirrorWindowController: NSWindowController, NSWindowDelegate,
         return NSSize(width: totalWidth, height: totalHeight)
     }
 
+    public func teardown() {
+        guard !isTornDown else { return }
+        isTornDown = true
+        onClose = nil
+        mtkView?.isPaused = true
+        mtkView?.delegate = nil
+        mtkView?.gameInputController.deactivateGameMode()
+        renderer?.clear()
+        renderer = nil
+        if let monitor = keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyMonitor = nil
+        }
+        if let obs = appResignObserver {
+            NotificationCenter.default.removeObserver(obs)
+            appResignObserver = nil
+        }
+    }
+
     public func windowWillClose(_ notification: Notification) {
-        mtkView.gameInputController.deactivateGameMode()
-        onClose?()
+        let closeHandler = onClose
+        teardown()
+        closeHandler?()
     }
 
     public func windowDidResignKey(_ notification: Notification) {
